@@ -42,6 +42,8 @@ export type Status = 'green' | 'amber' | 'red' | 'none'
 
 export interface Fund {
   id: string
+  /** The fund's public key, bound at first registration; signs its profile and rounds. */
+  key: string
   name: string
   description: string
   obligations: Obligation[]

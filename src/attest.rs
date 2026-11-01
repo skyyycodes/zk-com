@@ -10,6 +10,8 @@
 //! the same notes were held throughout; the registry refuses them for a
 //! second fund. A RedPallas signature under each proof's `rk` over the round
 //! message proves the fund holds the spending key, not just a viewing key.
+//! The fund's own key (`fundkey`) also signs it, so the registry can tie the
+//! round to the fund that registered that key.
 
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
@@ -30,11 +32,12 @@ use voting_crypto_deps::orchard::{
 };
 use voting_crypto_deps::pasta_curves::pallas;
 
+use crate::fundkey::{verify_sig, FundKey};
 use crate::ledger::Ledger;
 use crate::util::{fhex, hexf, label_to_field, zec, STEP_ZAT};
 use crate::wallet::{Wallet, WalletNote};
 
-pub const VERSION: &str = "z-solvency/v1";
+pub const VERSION: &str = "z-solvency/v2";
 pub const SLOTS: usize = 5;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -67,12 +70,15 @@ pub struct Attestation {
     pub version: String,
     pub registry: String,
     pub fund_id: String,
+    /// The fund's public key, as registered. Signs the round message.
+    pub fund_key: String,
     pub round: u64,
     pub threshold_zat: u64,
     pub since_height: u64,
     pub at_height: u64,
     pub at_block_hash: String,
     pub message: String,
+    pub fund_signature: String,
     pub since: Snapshot,
     pub at: Snapshot,
 }
@@ -85,9 +91,10 @@ impl Attestation {
 
 pub fn round_message(a: &Attestation) -> String {
     format!(
-        "{VERSION} attestation\nregistry: {}\nfund: {}\nround: {}\nthreshold_zat: {}\nsince_height: {}\nat_height: {}\nat_block_hash: {}\nregistry_nullifiers: {}\nvan_comm_since: {}\nvan_comm_at: {}\n",
+        "{VERSION} attestation\nregistry: {}\nfund: {}\nfund_key: {}\nround: {}\nthreshold_zat: {}\nsince_height: {}\nat_height: {}\nat_block_hash: {}\nregistry_nullifiers: {}\nvan_comm_since: {}\nvan_comm_at: {}\n",
         a.registry,
         a.fund_id,
+        a.fund_key,
         a.round,
         a.threshold_zat,
         a.since_height,
@@ -104,6 +111,7 @@ pub struct ProveRequest<'a> {
     pub ledger: &'a Ledger,
     pub registry: String,
     pub fund_id: String,
+    pub fund_key: &'a FundKey,
     pub round: u64,
     pub threshold_zat: u64,
     pub since: Option<u64>,
@@ -238,6 +246,9 @@ pub fn prove(req: ProveRequest) -> Result<Attestation> {
     if t == 0 || t % STEP_ZAT != 0 {
         bail!("threshold must be a positive multiple of 0.125 ZEC (got {} ZEC)", zec(t));
     }
+    if req.fund_key.fund_id != req.fund_id {
+        bail!("the fund key is for {}, not {}", req.fund_key.fund_id, req.fund_id);
+    }
     let h = req.at;
     req.ledger.block(h)?;
     let reserve: Vec<&WalletNote> = req.wallet.unspent_at(h).filter(|n| n.reserve).collect();
@@ -284,12 +295,14 @@ pub fn prove(req: ProveRequest) -> Result<Attestation> {
         version: VERSION.into(),
         registry: req.registry.clone(),
         fund_id: req.fund_id.clone(),
+        fund_key: req.fund_key.public()?,
         round: req.round,
         threshold_zat: t,
         since_height: req.cheat_claim_since.unwrap_or(since),
         at_height: h,
         at_block_hash: req.ledger.block(h)?.hash.clone(),
         message: String::new(),
+        fund_signature: String::new(),
         since: bx.snap,
         at: bh.snap,
     };
@@ -301,6 +314,7 @@ pub fn prove(req: ProveRequest) -> Result<Attestation> {
     let sh: [u8; 64] = (&bh.rsk.sign(OsRng, a.message.as_bytes())).into();
     a.since.signature = hex::encode(sx);
     a.at.signature = hex::encode(sh);
+    a.fund_signature = req.fund_key.sign(&a.message)?;
     Ok(a)
 }
 
@@ -427,6 +441,11 @@ pub fn verify(a: &Attestation, ledger: &Ledger) -> Verdict {
             bail!("threshold must be a positive multiple of 0.125 ZEC");
         }
         Ok(format!("round {}, T = {} ZEC", a.round, zec(a.threshold_zat)))
+    })());
+    c.add("fund key signature over the round message", (|| {
+        verify_sig(&a.fund_key, &a.message, &a.fund_signature)
+            .map_err(|_| anyhow!("fund signature invalid: not signed by the fund key it names"))?;
+        Ok(format!("signed by fund key {}", crate::util::short(&a.fund_key)))
     })());
     c.add("block hash at H matches the chain", (|| {
         let b = ledger.block(a.at_height)?;

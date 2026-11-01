@@ -1,5 +1,6 @@
 //! Tuesday's gate, plus the cheats, as one end-to-end test with real proofs.
 use zsolv::attest::{prove, verify, ProveRequest};
+use zsolv::fundkey::FundKey;
 use zsolv::ledger::Ledger;
 use zsolv::util::COIN;
 use zsolv::wallet::{make_reserve, transfer, Transfer, Wallet};
@@ -26,11 +27,13 @@ fn gate_and_cheats() {
     let hm1 = transfer(&mut l, Transfer { from: Some(&mut lender), from_label: "lender".into(), to: &mut quick, amount: 480 * COIN, memo: "loan".into(), reserve: true }).unwrap();
     let h = l.push_block(vec![], vec![]);
 
-    fn mk<'a>(w: &'a Wallet, l: &'a Ledger, log: &'a dyn Fn(&str), h: u64, fund_id: &str, since: Option<u64>, cheat: Option<u64>) -> ProveRequest<'a> { ProveRequest {
-        wallet: w, ledger: l, registry: "test-registry".into(), fund_id: fund_id.into(), round: 1,
+    let keys: Vec<FundKey> = ["mill", "quick", "shadow"].iter().map(|id| FundKey::generate(id)).collect();
+    fn mk<'a>(w: &'a Wallet, l: &'a Ledger, log: &'a dyn Fn(&str), h: u64, k: &'a FundKey, since: Option<u64>, cheat: Option<u64>) -> ProveRequest<'a> { ProveRequest {
+        wallet: w, ledger: l, registry: "test-registry".into(), fund_id: k.fund_id.clone(), fund_key: k, round: 1,
         threshold_zat: 480 * COIN, since, at: h, cheat_claim_since: cheat, log,
     } }
-    let req = |w, f, s, c| mk(w, &l, &log, h, f, s, c);
+    let key = |id: &str| keys.iter().find(|k| k.fund_id == id).unwrap();
+    let req = |w, f, s, c| mk(w, &l, &log, h, key(f), s, c);
 
     // gate: honest fund
     let a = prove(req(&fund, "mill", Some(x), None)).unwrap();
@@ -56,6 +59,12 @@ fn gate_and_cheats() {
     // tamper: claim a higher threshold in the message
     let mut t = a.clone();
     t.threshold_zat = 960 * COIN;
+    t.message = zsolv::attest::round_message(&t);
+    assert!(!verify(&t, &l).ok);
+
+    // tamper: swap in another fund key without its signature
+    let mut t = a.clone();
+    t.fund_key = key("quick").public().unwrap();
     t.message = zsolv::attest::round_message(&t);
     assert!(!verify(&t, &l).ok);
 

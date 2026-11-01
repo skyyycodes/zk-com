@@ -1,4 +1,5 @@
 pub mod attest;
+pub mod fundkey;
 pub mod imt;
 pub mod ledger;
 pub mod registry;

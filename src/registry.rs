@@ -1,6 +1,10 @@
 //! The public registry: stores fund profiles and attestations, verifies each
 //! attestation against chain data, and refuses a registry nullifier that is
 //! already counted by another fund. Serves the reserve pages.
+//!
+//! The first registration of a fund id binds the fund's public key. After
+//! that, profile changes and rounds are accepted only when that key signs
+//! them; anything else is refused without touching the fund's page.
 
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
@@ -8,7 +12,8 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::attest::{verify, Attestation, Verdict};
+use crate::attest::{round_message, verify, Attestation, Verdict, VERSION};
+use crate::fundkey::{verify_sig, FundKey};
 use crate::ledger::Ledger;
 use crate::store::{read_json, write_json, DataDir};
 use crate::util::{short, zec};
@@ -26,8 +31,9 @@ pub struct StoredAttestation {
     pub verdict: Verdict,
 }
 
+/// What a fund publishes about itself. Signed by the fund key on every change.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct Fund {
+pub struct Profile {
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -41,8 +47,43 @@ pub struct Fund {
     pub zec_usd: Option<f64>,
     #[serde(default)]
     pub price_time: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct Fund {
+    #[serde(flatten)]
+    pub profile: Profile,
+    /// The fund's public key, bound at first registration.
+    pub key: String,
+    /// Sequence number of the last accepted profile update.
+    pub profile_seq: u64,
     #[serde(default)]
     pub attestations: Vec<StoredAttestation>,
+}
+
+/// A profile change as sent to `POST /api/funds`. `profile` is the JSON text
+/// that was signed, so the registry checks exactly the bytes the fund signed.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ProfileUpdate {
+    pub profile: String,
+    pub key: String,
+    pub seq: u64,
+    pub signature: String,
+}
+
+pub fn profile_message(registry: &str, fund_id: &str, key: &str, seq: u64, profile: &str) -> String {
+    format!("{VERSION} profile\nregistry: {registry}\nfund: {fund_id}\nfund_key: {key}\nseq: {seq}\nprofile: {profile}\n")
+}
+
+/// Sign a profile change for `registry`. `seq` must exceed the last accepted one.
+pub fn sign_profile(registry: &str, p: &Profile, key: &FundKey, seq: u64) -> Result<ProfileUpdate> {
+    if key.fund_id != p.id {
+        bail!("the fund key is for {}, not {}", key.fund_id, p.id);
+    }
+    let profile = serde_json::to_string(p)?;
+    let pk = key.public()?;
+    let signature = key.sign(&profile_message(registry, &p.id, &pk, seq, &profile))?;
+    Ok(ProfileUpdate { profile, key: pk, seq, signature })
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -73,11 +114,32 @@ impl Registry {
         write_json(&d.registry(), self)
     }
 
-    pub fn upsert_fund(&mut self, mut f: Fund) {
-        if let Some(old) = self.funds.get(&f.id) {
-            f.attestations = old.attestations.clone();
+    /// Register a fund, or change its profile. A new id binds `u.key`; an
+    /// existing one needs a signature by its bound key and a newer `seq`.
+    pub fn register(&mut self, u: ProfileUpdate) -> Result<String> {
+        let p: Profile = serde_json::from_str(&u.profile).map_err(|e| anyhow!("bad profile: {e}"))?;
+        if p.id.is_empty() || !p.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            bail!("fund id must be letters, digits and dashes");
         }
-        self.funds.insert(f.id.clone(), f);
+        verify_sig(&u.key, &profile_message(&self.id, &p.id, &u.key, u.seq, &u.profile), &u.signature)
+            .map_err(|_| anyhow!("profile signature invalid"))?;
+        let id = p.id.clone();
+        match self.funds.get_mut(&id) {
+            Some(f) => {
+                if f.key != u.key {
+                    bail!("fund {id} is registered to another key; only that key can change its profile");
+                }
+                if u.seq <= f.profile_seq {
+                    bail!("profile update {} is not newer than {} already accepted", u.seq, f.profile_seq);
+                }
+                f.profile = p;
+                f.profile_seq = u.seq;
+            }
+            None => {
+                self.funds.insert(id.clone(), Fund { profile: p, key: u.key, profile_seq: u.seq, attestations: vec![] });
+            }
+        }
+        Ok(id)
     }
 
     fn event(&mut self, fund_id: &str, accepted: bool, summary: String) {
@@ -90,17 +152,23 @@ impl Registry {
         let Some(fund) = self.funds.get(&fund_id) else {
             bail!("unknown fund {fund_id}: register its profile first");
         };
+        // Refused without an event: only the fund's own fresh, signed rounds
+        // may write to its page, so nobody else can fill it with refusals.
+        if a.fund_key != fund.key {
+            return Ok((false, format!("not signed by the key registered for {fund_id}"), None));
+        }
+        if a.message != round_message(&a) || verify_sig(&fund.key, &a.message, &a.fund_signature).is_err() {
+            return Ok((false, format!("fund signature invalid for {fund_id}"), None));
+        }
+        if let Some(last) = fund.attestations.last() {
+            if a.round <= last.attestation.round {
+                return Ok((false, format!("round {} is not newer than round {} already published", a.round, last.attestation.round), None));
+            }
+        }
         if a.registry != self.id {
             let r = format!("attestation is for registry {}, this is {}", a.registry, self.id);
             self.event(&fund_id, false, r.clone());
             return Ok((false, r, None));
-        }
-        if let Some(last) = fund.attestations.last() {
-            if a.round <= last.attestation.round {
-                let r = format!("round {} is not newer than round {} already published", a.round, last.attestation.round);
-                self.event(&fund_id, false, r.clone());
-                return Ok((false, r, None));
-            }
         }
         let v = verify(&a, ledger);
         if !v.ok {
@@ -112,7 +180,7 @@ impl Registry {
         for n in a.registry_nullifiers() {
             if let Some(owner) = self.nullifier_owner.get(n) {
                 if owner != &fund_id {
-                    let owner_name = self.funds.get(owner).map(|f| f.name.clone()).unwrap_or(owner.clone());
+                    let owner_name = self.funds.get(owner).map(|f| f.profile.name.clone()).unwrap_or(owner.clone());
                     let r = format!("note already counted by {owner_name} (registry nullifier {})", short(n));
                     self.event(&fund_id, false, r.clone());
                     return Ok((false, r, Some(v)));
@@ -140,6 +208,7 @@ pub fn now() -> String {
 #[derive(Serialize)]
 pub struct FundView<'a> {
     pub id: &'a str,
+    pub key: &'a str,
     pub name: &'a str,
     pub description: &'a str,
     pub obligations: &'a [Obligation],
@@ -155,9 +224,10 @@ pub struct FundView<'a> {
     pub last_refusal: Option<String>,
 }
 
-pub fn fund_view<'a>(f: &'a Fund, tip: u64, events: &[Event]) -> FundView<'a> {
+pub fn fund_view<'a>(fund: &'a Fund, tip: u64, events: &[Event]) -> FundView<'a> {
+    let f = &fund.profile;
     let obligations_zat: u64 = f.obligations.iter().map(|o| o.zat).sum();
-    let latest = f.attestations.last();
+    let latest = fund.attestations.last();
     let last_refusal = events.iter().rev().find(|e| e.fund_id == f.id).filter(|e| !e.accepted).map(|e| e.summary.clone());
     let (status, status_text) = match latest {
         None => match &last_refusal {
@@ -198,6 +268,7 @@ pub fn fund_view<'a>(f: &'a Fund, tip: u64, events: &[Event]) -> FundView<'a> {
     });
     FundView {
         id: &f.id,
+        key: &fund.key,
         name: &f.name,
         description: &f.description,
         obligations: &f.obligations,
@@ -208,7 +279,7 @@ pub fn fund_view<'a>(f: &'a Fund, tip: u64, events: &[Event]) -> FundView<'a> {
         status,
         status_text,
         latest,
-        rounds: f.attestations.len(),
+        rounds: fund.attestations.len(),
         last_refusal,
     }
 }
@@ -258,12 +329,8 @@ fn handle(d: &DataDir, reg_id: &str, method: &str, url: &str, body: &str) -> Res
         }
         ("GET", ["api", "roots", h]) => (200, serde_json::to_value(ledger.roots(h.parse()?)?)?),
         ("POST", ["api", "funds"]) => {
-            let f: Fund = serde_json::from_str(body)?;
-            if f.id.is_empty() || !f.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-                bail!("fund id must be letters, digits and dashes");
-            }
-            let id = f.id.clone();
-            reg.upsert_fund(f);
+            let u: ProfileUpdate = serde_json::from_str(body).map_err(|e| anyhow!("bad profile update: {e}"))?;
+            let id = reg.register(u)?;
             reg.save(d)?;
             (200, json!({"ok": true, "id": id}))
         }

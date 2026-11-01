@@ -3,8 +3,9 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 use zsolv::attest::{prove, verify, Attestation, ProveRequest};
+use zsolv::fundkey::FundKey;
 use zsolv::ledger::Ledger;
-use zsolv::registry::{Fund, Obligation, Registry};
+use zsolv::registry::{sign_profile, Obligation, Profile, Registry};
 use zsolv::store::{read_json, write_json, DataDir};
 use zsolv::util::{parse_zec, zec};
 use zsolv::wallet::{make_reserve, transfer, Transfer, Wallet};
@@ -81,6 +82,9 @@ enum Cmd {
         round: u64,
         #[arg(long, default_value = DEFAULT_REGISTRY)]
         registry: String,
+        /// The fund's signing key (default: <data>/funds/<fund-id>.key.json).
+        #[arg(long)]
+        fund_key: Option<PathBuf>,
         #[arg(long)]
         out: Option<PathBuf>,
         /// Demo of a cheat: label the attestation as held since this block.
@@ -92,6 +96,7 @@ enum Cmd {
         file: PathBuf,
     },
     /// Register or update a fund's public profile (direct on the registry state, or --url).
+    /// Creates the fund's signing key on first use; every later change and round needs it.
     Fund {
         #[arg(long)]
         id: String,
@@ -112,6 +117,9 @@ enum Cmd {
         url: Option<String>,
         #[arg(long, default_value = DEFAULT_REGISTRY)]
         registry: String,
+        /// The fund's signing key (default: <data>/funds/<id>.key.json).
+        #[arg(long)]
+        fund_key: Option<PathBuf>,
     },
     /// Submit an attestation to a registry server.
     Submit {
@@ -159,6 +167,11 @@ enum WalletCmd {
 
 fn load_wallet(d: &DataDir, name: &str) -> Result<Wallet> {
     read_json(&d.wallet(name)).map_err(|_| anyhow!("no wallet named {name} (create it with `zsolv wallet new {name}`)"))
+}
+
+fn load_fund_key(d: &DataDir, fund_id: &str, path: Option<PathBuf>) -> Result<FundKey> {
+    let p = path.unwrap_or_else(|| d.fund_key(fund_id));
+    read_json(&p).map_err(|_| anyhow!("no fund key at {} (register the fund with `zsolv fund --id {fund_id}` first)", p.display()))
 }
 
 fn main() {
@@ -242,15 +255,17 @@ fn run() -> Result<()> {
             let r = l.roots(height.unwrap_or(l.tip()))?;
             println!("{}", serde_json::to_string_pretty(&r)?);
         }
-        Cmd::Prove { wallet, fund_id, threshold, since, at, round, registry, out, cheat_claim_since } => {
+        Cmd::Prove { wallet, fund_id, threshold, since, at, round, registry, fund_key, out, cheat_claim_since } => {
             let l = Ledger::load(&d.ledger())?;
             let w = load_wallet(&d, &wallet)?;
+            let fk = load_fund_key(&d, &fund_id, fund_key)?;
             let log = |s: &str| eprintln!("{s}");
             let a = prove(ProveRequest {
                 wallet: &w,
                 ledger: &l,
                 registry,
                 fund_id: fund_id.clone(),
+                fund_key: &fk,
                 round,
                 threshold_zat: parse_zec(&threshold)?,
                 since,
@@ -280,7 +295,7 @@ fn run() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Cmd::Fund { id, name, description, obligations, min_held_blocks, zec_usd, price_time, url, registry } => {
+        Cmd::Fund { id, name, description, obligations, min_held_blocks, zec_usd, price_time, url, registry, fund_key } => {
             let obligations = obligations
                 .iter()
                 .map(|o| {
@@ -288,13 +303,31 @@ fn run() -> Result<()> {
                     Ok(Obligation { label: label.trim().into(), zat: parse_zec(z)? })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let f = Fund { id: id.clone(), name, description, obligations, min_held_blocks, zec_usd, price_time, attestations: vec![] };
+            let key_path = fund_key.unwrap_or_else(|| d.fund_key(&id));
+            let fk = if key_path.exists() {
+                load_fund_key(&d, &id, Some(key_path))?
+            } else {
+                let k = FundKey::generate(&id);
+                write_json(&key_path, &k)?;
+                eprintln!("created fund key {} at {} (secret: keep it with the wallet)", k.public()?, key_path.display());
+                k
+            };
+            let p = Profile { id: id.clone(), name, description, obligations, min_held_blocks, zec_usd, price_time };
+            // Milliseconds since the epoch: increases across updates without local state.
+            let seq = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
+            let u = sign_profile(&registry, &p, &fk, seq)?;
             if let Some(url) = url {
-                let r = ureq::post(&format!("{}/api/funds", url.trim_end_matches('/'))).set("Content-Type", "application/json").send_string(&serde_json::to_string(&f)?)?;
-                println!("{}", r.into_string()?);
+                let r = ureq::post(&format!("{}/api/funds", url.trim_end_matches('/')))
+                    .set("Content-Type", "application/json")
+                    .send_string(&serde_json::to_string(&u)?);
+                match r {
+                    Ok(r) => println!("{}", r.into_string()?),
+                    Err(ureq::Error::Status(_, r)) => bail!("registry refused the profile: {}", r.into_string()?),
+                    Err(e) => return Err(e.into()),
+                }
             } else {
                 let mut reg = Registry::load_or_new(&d, &registry)?;
-                reg.upsert_fund(f);
+                reg.register(u)?;
                 reg.save(&d)?;
                 println!("fund {id} registered");
             }

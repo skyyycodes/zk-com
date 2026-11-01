@@ -24,6 +24,7 @@ A published viewing key would prove the balance, but it is permanent, exact, and
 |---|---|---|
 | At least T ZEC | The delegation circuit commits to the notes' total value in 0.125 ZEC steps (`van_comm`), and the fund opens that commitment. Over-claiming is impossible in-circuit. | Revealing the real balance |
 | Controlled by the fund | A RedPallas spend-auth signature under each proof's `rk` over the round message (fund, round, block H's hash, T, registry nullifiers). | Proving with someone else's viewing key; replaying an old proof |
+| Published by that fund | Registering a fund id binds the fund's own key. That key signs every profile change (with a rising sequence number) and every round message, and the registry refuses anything else without touching the fund's page. | Editing another fund's name or obligations; publishing a round under another fund with your own coins |
 | One note, one fund | Each note shows an alternate nullifier scoped to the registry (`vote_round_id` = registry id), not its real nullifier. The registry refuses one that another fund already counted. | Two funds counting the same coins |
 | Held since block X | Two proofs, at X and at H, over the same notes: all five registry nullifiers must match. A spent note can't come back. | Borrowing coins for audit day |
 
@@ -56,7 +57,7 @@ flowchart LR
 
 - **Prover** (`src/attest.rs`): for heights X and H it rebuilds the Ironwood note commitment tree (`src/tree.rs`) and the nullifier IMT (`src/imt.rs`), builds a Valar delegation proof over the reserve notes, reusing the same padding notes in both, and signs the round message with each proof's randomized key.
 - **Verifier** (`zsolv verify`, and the registry): rebuilds both roots from chain data and never trusts copies in the attestation. It checks both proofs, the value opening against T, both signatures, the block hash at H, that all five registry nullifiers match between X and H, and that they are distinct within each proof.
-- **Registry** (`src/registry.rs`): verifies each submission, refuses a registry nullifier already owned by another fund, refuses a round that isn't newer, and serves the JSON API plus the web app.
+- **Registry** (`src/registry.rs`): binds each fund id to the key that registered it, accepts profile changes and rounds only under that key, verifies each submission, refuses a registry nullifier already owned by another fund, refuses a round that isn't newer, and serves the JSON API plus the web app.
 - **Web** (`web/`): React + TypeScript (Vite). Shows the status light, held-since, last check, obligations, a live Verify button, and the viewing-key contrast panel.
 
 ## Run it
@@ -94,9 +95,10 @@ zsolv wallet new <name> | show <name>
 zsolv send --to <wallet> --amount <ZEC> [--from <wallet>] [--label ...] [--memo ...] [--reserve]
 zsolv reserve --wallet <w> --amount <ZEC>        # one reserve note of exactly T
 zsolv roots [--height N]                          # rebuild roots from chain data
-zsolv prove --wallet <w> --fund-id <id> --threshold <ZEC> [--since X] [--at H] [--round N] [--out file]
+zsolv prove --wallet <w> --fund-id <id> --threshold <ZEC> [--since X] [--at H] [--round N] [--fund-key file] [--out file]
 zsolv verify <attestation.json>
-zsolv fund --id <id> --name <name> --obligation "label=ZEC" [--min-held-blocks N] [--url URL]
+zsolv fund --id <id> --name <name> --obligation "label=ZEC" [--min-held-blocks N] [--url URL] [--fund-key file]
+                                                  # first run creates <data>/funds/<id>.key.json (secret)
 zsolv submit <attestation.json> [--url URL]
 zsolv serve [--addr 127.0.0.1:8080] [--web web/dist]
 ```
@@ -109,8 +111,8 @@ zsolv serve [--addr 127.0.0.1:8080] [--web web/dist]
 | GET | `/api/funds/:id` | One fund's page data |
 | GET | `/api/funds/:id/attestation` | Latest attestation (raw, for `zsolv verify`) |
 | POST | `/api/funds/:id/verify` | Re-verify the latest attestation now |
-| POST | `/api/funds` | Register or update a fund profile |
-| POST | `/api/attest` | Submit an attestation |
+| POST | `/api/funds` | Register or update a fund profile, signed by the fund key |
+| POST | `/api/attest` | Submit an attestation, signed by the fund key |
 | GET | `/api/roots/:height` | Tree and nullifier-IMT roots at a height |
 
 ## Built on
@@ -134,6 +136,7 @@ Pre-hack work (allowed by WebZero): this repository as of 1 Nov 2026. Work done 
 - The circuits are used outside the voting protocol they were designed and reviewed for. Check their audit status before mainnet.
 - At most 5 reserve notes per proof (one reserve note of exactly T is the intended use).
 - The registry nullifier links one fund's own rounds, by design. T, the heights and the timing are public.
+- Fund ids are first come, first served: whoever registers an id first binds its key. There is no key rotation or recovery yet; a lost fund key means registering a new id.
 - The registry is a single process with a JSON file. The Verify button runs on the registry; independent checks use `zsolv verify`.
 
 ## Roadmap
