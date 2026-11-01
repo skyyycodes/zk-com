@@ -1,0 +1,6 @@
+/target
+/data
+/attestations
+/web/node_modules
+/web/dist
+*.tmp
