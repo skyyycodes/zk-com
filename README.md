@@ -97,7 +97,7 @@ zsolv reserve --wallet <w> --amount <ZEC>        # one reserve note of exactly T
 zsolv roots [--height N]                          # rebuild roots from chain data
 zsolv prove --wallet <w> --fund-id <id> --threshold <ZEC> [--since X] [--at H] [--round N] [--fund-key file] [--out file]
 zsolv verify <attestation.json>
-zsolv fund --id <id> --name <name> --obligation "label=ZEC" [--min-held-blocks N] [--url URL] [--fund-key file]
+zsolv fund --id <id> --name <name> --obligation "label=ZEC" [--min-held-blocks N] [--max-proof-age-blocks N] [--url URL] [--fund-key file]
                                                   # first run creates <data>/funds/<id>.key.json (secret)
 zsolv submit <attestation.json> [--url URL]
 zsolv serve [--addr 127.0.0.1:8080] [--web web/dist]

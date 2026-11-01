@@ -43,6 +43,10 @@ pub struct Profile {
     /// Blocks the reserve must have been held to count as "held", e.g. 4 weeks.
     #[serde(default)]
     pub min_held_blocks: u64,
+    /// The fund promises a new proof at least this often; an older latest
+    /// proof shows amber. 0 turns the check off.
+    #[serde(default)]
+    pub max_proof_age_blocks: u64,
     #[serde(default)]
     pub zec_usd: Option<f64>,
     #[serde(default)]
@@ -214,6 +218,7 @@ pub struct FundView<'a> {
     pub obligations: &'a [Obligation],
     pub obligations_zat: u64,
     pub min_held_blocks: u64,
+    pub max_proof_age_blocks: u64,
     pub zec_usd: Option<f64>,
     pub price_time: &'a Option<String>,
     pub status: &'static str,
@@ -237,8 +242,11 @@ pub fn fund_view<'a>(fund: &'a Fund, tip: u64, events: &[Event]) -> FundView<'a>
         Some(s) => {
             let a = &s.attestation;
             let held = a.at_height - a.since_height;
+            let age = tip.saturating_sub(a.at_height);
             if !s.verdict.ok {
                 ("red", "Latest proof failed verification".into())
+            } else if f.max_proof_age_blocks > 0 && age > f.max_proof_age_blocks {
+                ("amber", format!("Latest proof is stale: checked {age} blocks ago (block {}); the fund promises a new one every {}", a.at_height, f.max_proof_age_blocks))
             } else if a.threshold_zat < obligations_zat {
                 ("amber", format!("Reserve {} ZEC is below obligations of {} ZEC", zec(a.threshold_zat), zec(obligations_zat)))
             } else if held < f.min_held_blocks {
@@ -274,6 +282,7 @@ pub fn fund_view<'a>(fund: &'a Fund, tip: u64, events: &[Event]) -> FundView<'a>
         obligations: &f.obligations,
         obligations_zat,
         min_held_blocks: f.min_held_blocks,
+        max_proof_age_blocks: f.max_proof_age_blocks,
         zec_usd: f.zec_usd,
         price_time: &f.price_time,
         status,

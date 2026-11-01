@@ -3,7 +3,7 @@
 use zsolv::attest::{prove, round_message, ProveRequest};
 use zsolv::fundkey::FundKey;
 use zsolv::ledger::Ledger;
-use zsolv::registry::{sign_profile, Obligation, Profile, Registry};
+use zsolv::registry::{fund_view, sign_profile, Obligation, Profile, Registry};
 use zsolv::util::COIN;
 use zsolv::wallet::{make_reserve, transfer, Transfer, Wallet};
 
@@ -84,6 +84,15 @@ fn only_the_fund_key_publishes_rounds() {
     let (ok, why, _) = reg.submit(r1.clone(), &l).unwrap();
     assert!(ok, "{why}");
     let events = reg.events.len();
+
+    // a proof older than the fund's promised cadence turns amber
+    let mut weekly = profile("mill", "Mill Workers' Strike Fund");
+    weekly.max_proof_age_blocks = 100;
+    reg.register(sign_profile(REG, &weekly, &mill_key, 2).unwrap()).unwrap();
+    assert_eq!(fund_view(&reg.funds["mill"], h + 100, &reg.events).status, "green");
+    let stale = fund_view(&reg.funds["mill"], h + 101, &reg.events);
+    assert_eq!(stale.status, "amber");
+    assert!(stale.status_text.contains("stale"), "{}", stale.status_text);
 
     // impostor with their own 480 ZEC note and their own key: a valid proof, wrong fund
     let hijack = req("other", &impostor_key, 2, None).unwrap();

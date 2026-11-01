@@ -49,6 +49,8 @@ export interface Fund {
   obligations: Obligation[]
   obligations_zat: number
   min_held_blocks: number
+  /** The fund promises a new proof at least this often (0: no promise). */
+  max_proof_age_blocks: number
   zec_usd: number | null
   price_time: string | null
   status: Status

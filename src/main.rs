@@ -109,6 +109,9 @@ enum Cmd {
         obligations: Vec<String>,
         #[arg(long, default_value_t = 0)]
         min_held_blocks: u64,
+        /// Promise a new proof at least this often (0: no promise). Default: a week of 75 s blocks.
+        #[arg(long, default_value_t = 8064)]
+        max_proof_age_blocks: u64,
         #[arg(long)]
         zec_usd: Option<f64>,
         #[arg(long)]
@@ -295,7 +298,7 @@ fn run() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Cmd::Fund { id, name, description, obligations, min_held_blocks, zec_usd, price_time, url, registry, fund_key } => {
+        Cmd::Fund { id, name, description, obligations, min_held_blocks, max_proof_age_blocks, zec_usd, price_time, url, registry, fund_key } => {
             let obligations = obligations
                 .iter()
                 .map(|o| {
@@ -312,7 +315,7 @@ fn run() -> Result<()> {
                 eprintln!("created fund key {} at {} (secret: keep it with the wallet)", k.public()?, key_path.display());
                 k
             };
-            let p = Profile { id: id.clone(), name, description, obligations, min_held_blocks, zec_usd, price_time };
+            let p = Profile { id: id.clone(), name, description, obligations, min_held_blocks, max_proof_age_blocks, zec_usd, price_time };
             // Milliseconds since the epoch: increases across updates without local state.
             let seq = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
             let u = sign_profile(&registry, &p, &fk, seq)?;

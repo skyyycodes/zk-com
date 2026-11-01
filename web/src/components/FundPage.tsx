@@ -73,7 +73,7 @@ function Facts({ fund, latest }: { fund: Fund; latest: LatestAttestation }) {
       <Fact
         k="Last checked at"
         v={`block ${latest.at_height}`}
-        sub={latest.blocks_behind_tip === 0 ? 'the current tip' : `${blocks(latest.blocks_behind_tip)} behind tip`}
+        sub={`${latest.blocks_behind_tip === 0 ? 'the current tip' : `${blocks(latest.blocks_behind_tip)} behind tip`}${fund.max_proof_age_blocks ? ` · new proof every ${fund.max_proof_age_blocks}` : ''}`}
       />
       <Fact
         k="Registry nullifier"
