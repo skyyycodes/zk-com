@@ -302,10 +302,9 @@ fn json_resp(code: u16, v: &impl Serialize) -> tiny_http::Response<std::io::Curs
         .with_header("Access-Control-Allow-Origin: *".parse::<tiny_http::Header>().unwrap())
 }
 
-fn handle(d: &DataDir, reg_id: &str, method: &str, url: &str, body: &str) -> Result<(u16, serde_json::Value)> {
+fn handle(d: &DataDir, reg_id: &str, ledger: &Ledger, method: &str, url: &str, body: &str) -> Result<(u16, serde_json::Value)> {
     let path = url.split('?').next().unwrap_or(url);
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
-    let ledger = Ledger::load(&d.ledger())?;
     let tip = ledger.tip();
     let mut reg = Registry::load_or_new(d, reg_id)?;
     use serde_json::json;
@@ -327,7 +326,7 @@ fn handle(d: &DataDir, reg_id: &str, method: &str, url: &str, body: &str) -> Res
         },
         ("POST", ["api", "funds", id, "verify"]) => match reg.funds.get(*id).and_then(|f| f.attestations.last()) {
             Some(s) => {
-                let v = verify(&s.attestation, &ledger);
+                let v = verify(&s.attestation, ledger);
                 (200, serde_json::to_value(v)?)
             }
             None => (404, json!({"error": "no attestation"})),
@@ -345,7 +344,7 @@ fn handle(d: &DataDir, reg_id: &str, method: &str, url: &str, body: &str) -> Res
         }
         ("POST", ["api", "attest"]) => {
             let a: Attestation = serde_json::from_str(body).map_err(|e| anyhow!("bad attestation: {e}"))?;
-            let (accepted, reason, verdict) = reg.submit(a, &ledger)?;
+            let (accepted, reason, verdict) = reg.submit(a, ledger)?;
             reg.save(d)?;
             (if accepted { 200 } else { 422 }, json!({"accepted": accepted, "reason": reason, "verdict": verdict}))
         }
@@ -391,9 +390,76 @@ fn static_file(web: &Path, url_path: &str) -> tiny_http::Response<std::io::Curso
     }
 }
 
-pub fn serve(d: DataDir, reg_id: String, addr: &str, web: PathBuf) -> Result<()> {
+/// Chain data kept in memory (testnet's is ~100 MB), reloaded when the file
+/// changes, e.g. after `zsolv testnet sync` runs beside the server.
+struct LedgerCache {
+    d: DataDir,
+    stamp: Option<(PathBuf, u64, std::time::SystemTime)>,
+    ledger: Option<Ledger>,
+}
+
+impl LedgerCache {
+    fn get(&mut self) -> Result<&Ledger> {
+        let p = self.d.ledger();
+        let m = std::fs::metadata(&p).map_err(|_| anyhow!("no chain data at {}", p.display()))?;
+        let stamp = Some((p.clone(), m.len(), m.modified()?));
+        if self.ledger.is_none() || stamp != self.stamp {
+            self.ledger = Some(Ledger::load(&p)?);
+            self.stamp = stamp;
+        }
+        Ok(self.ledger.as_ref().unwrap())
+    }
+}
+
+/// Per-client token bucket for requests that cost real work: every POST
+/// (each submission or Verify checks two proofs, about a second) and root
+/// rebuilds at arbitrary heights.
+pub struct RateLimit {
+    pub per_minute: u32,
+    /// Take the client from the last X-Forwarded-For entry, the one your own
+    /// proxy appended (only behind such a proxy; earlier entries are forgeable).
+    pub trust_proxy: bool,
+}
+
+struct Buckets {
+    per_minute: f64,
+    map: std::collections::HashMap<String, (f64, std::time::Instant)>,
+}
+
+impl Buckets {
+    /// Ok, or the seconds to wait.
+    fn take(&mut self, client: &str) -> std::result::Result<(), u64> {
+        if self.per_minute <= 0.0 {
+            return Ok(());
+        }
+        let now = std::time::Instant::now();
+        if self.map.len() > 10_000 {
+            let cap = self.per_minute;
+            let rate = cap / 60.0;
+            self.map.retain(|_, (t, at)| *t + now.duration_since(*at).as_secs_f64() * rate < cap);
+        }
+        let cap = self.per_minute;
+        let (tokens, at) = self.map.entry(client.to_string()).or_insert((cap, now));
+        *tokens = (*tokens + now.duration_since(*at).as_secs_f64() * cap / 60.0).min(cap);
+        *at = now;
+        if *tokens >= 1.0 {
+            *tokens -= 1.0;
+            Ok(())
+        } else {
+            Err(((1.0 - *tokens) * 60.0 / cap).ceil() as u64)
+        }
+    }
+}
+
+fn costly(method: &str, path: &str) -> bool {
+    method == "POST" || path.starts_with("/api/roots/")
+}
+
+pub fn serve(d: DataDir, reg_id: String, addr: &str, web: PathBuf, limit: RateLimit) -> Result<()> {
     let server = tiny_http::Server::http(addr).map_err(|e| anyhow!("{e}"))?;
-    eprintln!("Z-Solvency registry {reg_id} on http://{addr}");
+    eprintln!("Z-Solvency registry {reg_id} on http://{addr} (costly requests: {} per minute per client)", limit.per_minute);
+    let mut chain = LedgerCache { d: d.clone(), stamp: None, ledger: None };
+    let mut buckets = Buckets { per_minute: limit.per_minute as f64, map: Default::default() };
     if !web.join("index.html").is_file() {
         eprintln!("warning: no web build at {} (npm --prefix web ci && npm --prefix web run build)", web.display());
     }
@@ -414,10 +480,23 @@ pub fn serve(d: DataDir, reg_id: String, addr: &str, web: PathBuf) -> Result<()>
             let _ = rq.respond(resp);
             continue;
         }
+        if costly(&method, &path) {
+            let fwd = limit.trust_proxy.then(|| {
+                rq.headers().iter().find(|h| h.field.equiv("X-Forwarded-For")).map(|h| h.value.as_str().rsplit(',').next().unwrap_or("").trim().to_string())
+            }).flatten();
+            let client = fwd.unwrap_or_else(|| rq.remote_addr().map(|a| a.ip().to_string()).unwrap_or_default());
+            if let Err(wait) = buckets.take(&client) {
+                let resp = json_resp(429, &serde_json::json!({"error": format!("too many requests: try again in {wait} s")}))
+                    .with_header(format!("Retry-After: {wait}").parse::<tiny_http::Header>().unwrap());
+                eprintln!("{method} {url} 429 for {client}");
+                let _ = rq.respond(resp);
+                continue;
+            }
+        }
         let mut body = String::new();
         let _ = rq.as_reader().take(8 << 20).read_to_string(&mut body);
         let t0 = std::time::Instant::now();
-        let resp = match handle(&d, &reg_id, &method, &url, &body) {
+        let resp = match chain.get().and_then(|l| handle(&d, &reg_id, l, &method, &url, &body)) {
             Ok((code, v)) => json_resp(code, &v),
             Err(e) => json_resp(400, &serde_json::json!({"error": e.to_string()})),
         };

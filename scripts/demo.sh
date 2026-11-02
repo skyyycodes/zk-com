@@ -45,7 +45,7 @@ echo "check height H=$H"
 
 step "Registry"
 if ! curl -s "$URL/api/state" >/dev/null 2>&1; then
-  $Z serve >/tmp/zsolv-serve.log 2>&1 &
+  ZSOLV_RATE_LIMIT="${ZSOLV_RATE_LIMIT:-0}" $Z serve >/tmp/zsolv-serve.log 2>&1 &
   for i in $(seq 1 50); do curl -s "$URL/api/state" >/dev/null 2>&1 && break; sleep 0.2; done
 fi
 $Z fund --url "$URL" --id mill --name "Mill Workers' Strike Fund" \

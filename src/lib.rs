@@ -2,6 +2,7 @@ pub mod attest;
 pub mod fundkey;
 pub mod imt;
 pub mod ledger;
+pub mod lightwalletd;
 pub mod registry;
 pub mod store;
 pub mod tree;

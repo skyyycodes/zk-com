@@ -172,7 +172,8 @@ fn build_snapshot(
         let imt_proof = imt
             .non_membership_proof(voting_crypto_deps::CircuitValue::circuit_value(&nf))
             .map_err(|e| anyhow!("at block {height}: {}", e.0))?;
-        inputs.push(RealNoteInput { note, fvk: fvk.clone(), merkle_path, imt_proof, scope: Scope::External });
+        let scope = if wn.internal { Scope::Internal } else { Scope::External };
+        inputs.push(RealNoteInput { note, fvk: fvk.clone(), merkle_path, imt_proof, scope });
     }
     let total: u64 = notes.iter().map(|n| n.value_zat).sum();
 

@@ -21,8 +21,13 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
 pub struct DataDir(pub PathBuf);
 
 impl DataDir {
+    /// Chain data: testnet's binary file if present, else the devnet's JSON.
     pub fn ledger(&self) -> PathBuf {
-        self.0.join("chain/ledger.json")
+        let bin = self.testnet_ledger();
+        if bin.exists() { bin } else { self.0.join("chain/ledger.json") }
+    }
+    pub fn testnet_ledger(&self) -> PathBuf {
+        self.0.join("chain/ledger.bin")
     }
     pub fn wallet(&self, name: &str) -> PathBuf {
         self.0.join(format!("wallets/{name}.json"))

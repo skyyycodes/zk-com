@@ -87,20 +87,53 @@ Frontend development with hot reload, proxying `/api` to a running registry:
 npm --prefix web run dev
 ```
 
+### On Zcash testnet
+
+Chain data comes from a lightwalletd server (default `https://testnet.zec.rocks:443`) into `data-testnet/chain/ledger.bin`: every Ironwood action since activation at block 4,134,000. Each block must extend the last one, and its Ironwood tree size must match what the server reports.
+
+```bash
+export ZSOLV_DATA=data-testnet
+zsolv testnet sync                       # about 6 minutes the first time; then incremental
+zsolv roots --check                      # rebuilt Ironwood root vs. the node's own tree state
+```
+
+On 2 Nov 2026 the rebuilt root matched Zebra's at block 4,570,881 (798,245 commitments).
+
+The fund keeps using an everyday Ironwood wallet (Zkool, Zingo) to receive and pay: Orchard receivers receive into Ironwood after NU6.3. Z-Solvency derives the same key from the seed phrase (ZIP 32, testnet coin type) and finds the notes by trial decryption:
+
+```bash
+ZSOLV_MNEMONIC="..." zsolv wallet import mill
+zsolv wallet scan mill                   # about a minute over the whole testnet pool
+zsolv reserve --wallet mill --amount 480 # marks the note of exactly 480 TAZ the wallet sent itself
+```
+
+`scripts/testnet-demo.sh` runs the whole demo on testnet from there and saves a snapshot of the public data, so the page can be replayed without testnet.
+
+### Deploy
+
+`Dockerfile` builds the registry and web app. `compose.yaml` runs it with a sync loop and Caddy for HTTPS on any VPS:
+
+```bash
+DOMAIN=reserves.example.org docker compose up -d --build
+```
+
+Costly requests (submissions, Verify, root rebuilds) are limited per client (`--rate-limit`, default 10 a minute).
+
 ### CLI
 
 ```
 zsolv devnet init | mine --blocks N | status
-zsolv wallet new <name> | show <name>
+zsolv testnet info | sync [--server URL] [--to H] [--rewind N]
+zsolv wallet new <name> | show <name> | import <name> [--account N] [--birthday H] | scan <name>
 zsolv send --to <wallet> --amount <ZEC> [--from <wallet>] [--label ...] [--memo ...] [--reserve]
-zsolv reserve --wallet <w> --amount <ZEC>        # one reserve note of exactly T
-zsolv roots [--height N]                          # rebuild roots from chain data
+zsolv reserve --wallet <w> --amount <ZEC> [--cmx prefix]  # devnet: make it; testnet: mark it
+zsolv roots [--height N] [--check]                # rebuild roots; --check against the node
 zsolv prove --wallet <w> --fund-id <id> --threshold <ZEC> [--since X] [--at H] [--round N] [--fund-key file] [--out file]
 zsolv verify <attestation.json>
 zsolv fund --id <id> --name <name> --obligation "label=ZEC" [--min-held-blocks N] [--max-proof-age-blocks N] [--url URL] [--fund-key file]
                                                   # first run creates <data>/funds/<id>.key.json (secret)
 zsolv submit <attestation.json> [--url URL]
-zsolv serve [--addr 127.0.0.1:8080] [--web web/dist]
+zsolv serve [--addr 127.0.0.1:8080] [--web web/dist] [--rate-limit N] [--trust-proxy]
 ```
 
 ### API
@@ -132,7 +165,8 @@ Pre-hack work (allowed by WebZero): this repository as of 1 Nov 2026. Work done 
 
 ## Limits
 
-- **Devnet, not testnet yet.** Chain data comes from a local Ironwood devnet (`data/chain/ledger.json`), and wallets record received notes directly instead of trial-decrypting. Testnet needs an Ironwood-capable lightwalletd and scanner to feed `zsolv roots` and the wallet; the proof and verify path stays the same.
+- **Testnet chain data is trusted from one lightwalletd server.** The registry checks that blocks link up and that tree sizes match, and it rebuilds the roots itself, but it doesn't check proof of work. `zsolv roots --check` compares against that node's own tree state, not an independent one.
+- The scan uses compact ciphertexts, so memos aren't read. The fund's everyday wallet has them.
 - The circuits are used outside the voting protocol they were designed and reviewed for. Check their audit status before mainnet.
 - At most 5 reserve notes per proof (one reserve note of exactly T is the intended use).
 - The registry nullifier links one fund's own rounds, by design. T, the heights and the timing are public.
@@ -141,7 +175,7 @@ Pre-hack work (allowed by WebZero): this repository as of 1 Nov 2026. Work done 
 
 ## Roadmap
 
-1. Testnet: Ironwood scanning, real roots, real notes.
+1. A testnet fund holding real notes (the chain data and scanning are done).
 2. Range proof for "at least T" with a hidden total.
 3. Member-checkable liabilities: a Merkle-sum tree of balances each member can check, with T set to its total.
 4. Verification in the browser (WASM), then mainnet.

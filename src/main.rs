@@ -11,6 +11,7 @@ use zsolv::util::{parse_zec, zec};
 use zsolv::wallet::{make_reserve, transfer, Transfer, Wallet};
 
 const DEFAULT_REGISTRY: &str = "zsolv-devnet-registry-1";
+const DEFAULT_SERVER: &str = "https://testnet.zec.rocks:443";
 
 #[derive(Parser)]
 #[command(name = "zsolv", about = "Z-Solvency: show the money, not the people")]
@@ -28,6 +29,11 @@ enum Cmd {
     Devnet {
         #[command(subcommand)]
         cmd: DevnetCmd,
+    },
+    /// Zcash testnet chain data from a lightwalletd server.
+    Testnet {
+        #[command(subcommand)]
+        cmd: TestnetCmd,
     },
     /// Fund-side wallets (secret: they never leave the fund).
     Wallet {
@@ -52,16 +58,25 @@ enum Cmd {
         reserve: bool,
     },
     /// Move ZEC from operating notes into one reserve note of exactly AMOUNT.
+    /// On testnet, marks the existing unspent note of exactly AMOUNT instead.
     Reserve {
         #[arg(long)]
         wallet: String,
         #[arg(long)]
         amount: String,
+        /// Testnet: which note, by cmx prefix, when several match.
+        #[arg(long)]
+        cmx: Option<String>,
     },
     /// Rebuild the Ironwood tree root and nullifier-IMT root at a height from chain data.
     Roots {
         #[arg(long)]
         height: Option<u64>,
+        /// Also compare the rebuilt tree root with the node's own Ironwood tree state.
+        #[arg(long)]
+        check: bool,
+        #[arg(long, default_value = DEFAULT_SERVER, env = "ZSOLV_SERVER")]
+        server: String,
     },
     /// Make an attestation: at least T ZEC, held since block X, checked at block H.
     Prove {
@@ -132,13 +147,19 @@ enum Cmd {
     },
     /// Run the registry and reserve pages.
     Serve {
-        #[arg(long, default_value = "127.0.0.1:8080")]
+        #[arg(long, default_value = "127.0.0.1:8080", env = "ZSOLV_ADDR")]
         addr: String,
-        #[arg(long, default_value = DEFAULT_REGISTRY)]
+        #[arg(long, default_value = DEFAULT_REGISTRY, env = "ZSOLV_REGISTRY")]
         registry: String,
         /// The built web app to serve.
         #[arg(long, default_value = "web/dist")]
         web: PathBuf,
+        /// Costly requests (submissions, Verify, root rebuilds) per minute per client; 0 = no limit.
+        #[arg(long, default_value_t = 10, env = "ZSOLV_RATE_LIMIT")]
+        rate_limit: u32,
+        /// Behind your own reverse proxy: identify clients by X-Forwarded-For.
+        #[arg(long, env = "ZSOLV_TRUST_PROXY")]
+        trust_proxy: bool,
     },
     /// Demo: write what publishing this wallet's viewing key would reveal, for the contrast panel.
     ViewingKeyDemo {
@@ -163,8 +184,44 @@ enum DevnetCmd {
 }
 
 #[derive(Subcommand)]
+enum TestnetCmd {
+    /// Show what the server serves: chain, tip, branch, Ironwood tree size.
+    Info {
+        #[arg(long, default_value = DEFAULT_SERVER, env = "ZSOLV_SERVER")]
+        server: String,
+    },
+    /// Fetch Ironwood chain data from activation (or the last synced block) into <data>/chain/ledger.bin.
+    Sync {
+        #[arg(long, default_value = DEFAULT_SERVER, env = "ZSOLV_SERVER")]
+        server: String,
+        /// Stop at this height (default: tip minus --confirmations).
+        #[arg(long)]
+        to: Option<u64>,
+        #[arg(long, default_value_t = 10)]
+        confirmations: u64,
+        /// Drop this many blocks from the local tip first (after a reorg).
+        #[arg(long)]
+        rewind: Option<u64>,
+    },
+}
+
+#[derive(Subcommand)]
 enum WalletCmd {
     New { name: String },
+    /// Testnet: derive the wallet from the fund's seed phrase (the one its everyday wallet uses).
+    Import {
+        name: String,
+        /// BIP-39 seed phrase. Prefer the env var to keep it out of shell history.
+        #[arg(long, env = "ZSOLV_MNEMONIC", hide_env_values = true)]
+        mnemonic: String,
+        #[arg(long, default_value_t = 0)]
+        account: u32,
+        /// Scan from this height (default: Ironwood activation).
+        #[arg(long, default_value_t = zsolv::ledger::TESTNET_IRONWOOD_ACTIVATION)]
+        birthday: u64,
+    },
+    /// Testnet: find the wallet's notes by trial decryption, and which are spent.
+    Scan { name: String },
     Show { name: String },
 }
 
@@ -198,6 +255,9 @@ fn run() -> Result<()> {
             }
             DevnetCmd::Mine { blocks } => {
                 let mut l = Ledger::load(&d.ledger())?;
+                if !l.is_devnet() {
+                    bail!("this data directory holds testnet chain data");
+                }
                 for _ in 0..blocks {
                     l.push_block(vec![], vec![]);
                 }
@@ -210,6 +270,53 @@ fn run() -> Result<()> {
                 println!("{} ({} pool) tip {} — {} note commitments, {} nullifiers", l.network, l.pool, l.tip(), r.commitments, r.nullifiers);
             }
         },
+        Cmd::Testnet { cmd } => match cmd {
+            TestnetCmd::Info { server } => {
+                let mut c = zsolv::lightwalletd::Lightwalletd::connect(&server)?;
+                let i = c.info()?;
+                println!("{} {} ({}), chain {}, branch {}, tip {} (estimated {}), node {} {}, protocol {}",
+                    i.vendor, i.version, server, i.chain_name, i.consensus_branch_id, i.block_height, i.estimated_height,
+                    i.zcashd_build, i.zcashd_subversion, i.lightwallet_protocol_version);
+                let t = c.tree_state(i.block_height)?;
+                println!("tree state at {}: hash {}, ironwood tree {} hex chars", t.height, t.hash, t.ironwood_tree.len());
+                let mut n = 0;
+                c.blocks(i.block_height, i.block_height, |b| {
+                    n += 1;
+                    println!("compact block {}: {} txs with Ironwood data, ironwood tree size {:?}",
+                        b.height, b.vtx.len(), b.chain_metadata.map(|m| m.ironwood_commitment_tree_size));
+                    Ok(())
+                })?;
+                if n == 0 { bail!("server returned no compact block for the tip"); }
+            }
+            TestnetCmd::Sync { server, to, confirmations, rewind } => {
+                let path = d.testnet_ledger();
+                let mut l = if path.exists() { Ledger::load(&path)? } else { Ledger::new_testnet() };
+                if let Some(r) = rewind {
+                    l.truncate(l.tip().saturating_sub(r).max(l.start_height()))?;
+                }
+                let mut c = zsolv::lightwalletd::Lightwalletd::connect(&server)?;
+                let target = to.unwrap_or(c.tip()?.saturating_sub(confirmations));
+                let mut next = if l.blocks.is_empty() { zsolv::ledger::TESTNET_IRONWOOD_ACTIVATION } else { l.tip() + 1 };
+                let t0 = std::time::Instant::now();
+                let mut unsaved = 0;
+                while next <= target {
+                    let end = (next + 9_999).min(target);
+                    c.blocks(next, end, |b| l.push_compact(&b))?;
+                    if l.tip() != end {
+                        bail!("server stopped at block {} of {next}..={end}", l.tip());
+                    }
+                    eprintln!("block {end} of {target}: {} Ironwood actions ({:.0?})", l.commitment_count(), t0.elapsed());
+                    next = end + 1;
+                    unsaved += 1;
+                    if unsaved == 5 {
+                        l.save(&path)?;
+                        unsaved = 0;
+                    }
+                }
+                l.save(&path)?;
+                println!("testnet chain data: blocks {}..={}, {} Ironwood actions, at {}", l.start_height(), l.tip(), l.commitment_count(), path.display());
+            }
+        },
         Cmd::Wallet { cmd } => match cmd {
             WalletCmd::New { name } => {
                 if d.wallet(&name).exists() {
@@ -218,6 +325,25 @@ fn run() -> Result<()> {
                 write_json(&d.wallet(&name), &Wallet::generate(&name))?;
                 println!("created wallet {name}");
             }
+            WalletCmd::Import { name, mnemonic, account, birthday } => {
+                if d.wallet(&name).exists() {
+                    bail!("wallet {name} exists");
+                }
+                write_json(&d.wallet(&name), &Wallet::from_mnemonic(&name, &mnemonic, account, birthday)?)?;
+                println!("imported wallet {name} (account {account}, scanning from block {birthday}); run `zsolv wallet scan {name}`");
+            }
+            WalletCmd::Scan { name } => {
+                let l = Ledger::load(&d.ledger())?;
+                if l.is_devnet() {
+                    bail!("devnet wallets record their notes directly; scan is for testnet chain data");
+                }
+                let mut w = load_wallet(&d, &name)?;
+                let t0 = std::time::Instant::now();
+                let n = w.scan(&l)?;
+                write_json(&d.wallet(&name), &w)?;
+                eprintln!("scanned blocks {}..={} in {:.1?}: {n} notes", w.birthday.max(l.start_height()), l.tip(), t0.elapsed());
+                print!("{}", w.summary(l.tip()));
+            }
             WalletCmd::Show { name } => {
                 let l = Ledger::load(&d.ledger())?;
                 print!("{}", load_wallet(&d, &name)?.summary(l.tip()));
@@ -225,6 +351,9 @@ fn run() -> Result<()> {
         },
         Cmd::Send { to, amount, from, label, memo, reserve } => {
             let mut l = Ledger::load(&d.ledger())?;
+            if !l.is_devnet() {
+                bail!("`zsolv send` is devnet only: on testnet, send from the fund's everyday wallet");
+            }
             let mut tw = load_wallet(&d, &to)?;
             let amount = parse_zec(&amount)?;
             let h = if let Some(f) = &from {
@@ -243,20 +372,42 @@ fn run() -> Result<()> {
             l.save(&d.ledger())?;
             println!("block {h}: {} ZEC → {to}{}", zec(amount), if reserve { " (reserve note)" } else { "" });
         }
-        Cmd::Reserve { wallet, amount } => {
+        Cmd::Reserve { wallet, amount, cmx } => {
             let mut l = Ledger::load(&d.ledger())?;
             let mut w = load_wallet(&d, &wallet)?;
             let amount = parse_zec(&amount)?;
+            if !l.is_devnet() {
+                let n = w.mark_reserve(amount, cmx.as_deref())?;
+                println!("reserve note {} of exactly {} ZEC, received at block {}", zsolv::util::short(&n.cmx), zec(amount), n.height);
+                write_json(&d.wallet(&wallet), &w)?;
+                return Ok(());
+            }
             let h = make_reserve(&mut l, &mut w, amount)?;
             write_json(&d.wallet(&wallet), &w)?;
             l.save(&d.ledger())?;
             println!("block {h}: reserve note of exactly {} ZEC created in {wallet}", zec(amount));
         }
-        Cmd::Roots { height } => {
+        Cmd::Roots { height, check, server } => {
             let l = Ledger::load(&d.ledger())?;
             l.check_links()?;
             let r = l.roots(height.unwrap_or(l.tip()))?;
             println!("{}", serde_json::to_string_pretty(&r)?);
+            if check {
+                if l.is_devnet() {
+                    bail!("--check compares with a testnet node; this is devnet chain data");
+                }
+                let t = zsolv::lightwalletd::Lightwalletd::connect(&server)?.tree_state(r.height)?;
+                let (root, size) = zsolv::tree::frontier_root(&t.ironwood_tree)?;
+                let root = zsolv::util::fhex(&root);
+                println!("node at {}: block {}, Ironwood tree root {root}, {size} commitments", server, t.hash);
+                if t.hash != r.block_hash {
+                    bail!("block {} hash differs from the node's: {} vs {}", r.height, r.block_hash, t.hash);
+                }
+                if root != r.nc_root || size != r.commitments as u64 {
+                    bail!("rebuilt Ironwood root does NOT match the node's");
+                }
+                println!("MATCH: the rebuilt Ironwood tree root equals the node's at block {}", r.height);
+            }
         }
         Cmd::Prove { wallet, fund_id, threshold, since, at, round, registry, fund_key, out, cheat_claim_since } => {
             let l = Ledger::load(&d.ledger())?;
@@ -351,7 +502,9 @@ fn run() -> Result<()> {
             }
             println!("{} {}", if code == 200 { "ACCEPTED:" } else { "REFUSED:" }, v["reason"].as_str().unwrap_or(""));
         }
-        Cmd::Serve { addr, registry, web } => zsolv::registry::serve(d, registry, &addr, web)?,
+        Cmd::Serve { addr, registry, web, rate_limit, trust_proxy } => {
+            zsolv::registry::serve(d, registry, &addr, web, zsolv::registry::RateLimit { per_minute: rate_limit, trust_proxy })?
+        }
         Cmd::ViewingKeyDemo { wallet, fund_id } => {
             let w = load_wallet(&d, &wallet)?;
             let l = Ledger::load(&d.ledger())?;

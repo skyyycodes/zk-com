@@ -1,0 +1,35 @@
+# The live page on any VPS with ports 80/443 open and DNS for $DOMAIN pointing at it:
+#   DOMAIN=reserves.example.org docker compose up -d --build
+# Caddy gets and renews the HTTPS certificate. `sync` keeps testnet chain data
+# current; the registry reloads it when the file changes.
+services:
+  registry:
+    build: .
+    restart: unless-stopped
+    environment:
+      ZSOLV_REGISTRY: zsolv-testnet-registry-1
+      ZSOLV_TRUST_PROXY: "true"
+      ZSOLV_RATE_LIMIT: "10"
+    volumes:
+      - zsolv-data:/data
+
+  sync:
+    build: .
+    restart: unless-stopped
+    command: ["sh", "-c", "while true; do zsolv testnet sync; sleep 300; done"]
+    volumes:
+      - zsolv-data:/data
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    command: ["caddy", "reverse-proxy", "--from", "${DOMAIN:?set DOMAIN}", "--to", "registry:8080"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy-data:/data
+
+volumes:
+  zsolv-data:
+  caddy-data:

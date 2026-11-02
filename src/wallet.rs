@@ -1,16 +1,20 @@
-//! A minimal devnet wallet. It keeps the spending key and the plaintext of
-//! notes it received (what trial decryption would recover on a real chain).
+//! A minimal wallet. It keeps the spending key and the plaintext of the
+//! notes it holds. On the devnet it records notes as it receives them; on
+//! testnet it finds them by trial-decrypting every Ironwood action (`scan`),
+//! with the key derived from the same seed as the fund's everyday wallet.
 //! This file is the fund's secret: it never leaves the fund's machine.
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use voting_circuits::rand::rngs::OsRng;
 use voting_crypto_deps::orchard::{
-    keys::{FullViewingKey, Scope, SpendingKey},
-    note::{ExtractedNoteCommitment, NoteVersion, RandomSeed, Rho},
+    keys::{FullViewingKey, PreparedIncomingViewingKey, Scope, SpendingKey},
+    note::{ExtractedNoteCommitment, NoteVersion, Nullifier, RandomSeed, Rho},
+    note_encryption::{CompactAction, IronwoodDomain},
     value::NoteValue,
     Address, Note,
 };
+use voting_crypto_deps::zcash_note_encryption::{try_compact_note_decryption, EphemeralKeyBytes};
 
 use crate::ledger::Ledger;
 use crate::util::{b32, zec};
@@ -31,6 +35,9 @@ pub struct WalletNote {
     pub memo: String,
     #[serde(default)]
     pub counterparty: String,
+    /// Sent to the wallet's internal (change) address.
+    #[serde(default)]
+    pub internal: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -49,12 +56,80 @@ pub struct Wallet {
     pub notes: Vec<WalletNote>,
     #[serde(default)]
     pub history: Vec<HistoryEntry>,
+    /// Testnet: scan from this height (the wallet's birthday).
+    #[serde(default)]
+    pub birthday: u64,
 }
 
 impl Wallet {
     pub fn generate(name: &str) -> Self {
         let sk = voting_crypto_deps::random_spending_key(&mut OsRng);
-        Wallet { name: name.into(), spending_key: hex::encode(sk.to_bytes()), notes: vec![], history: vec![] }
+        Wallet { name: name.into(), spending_key: hex::encode(sk.to_bytes()), notes: vec![], history: vec![], birthday: 0 }
+    }
+
+    /// The account's Orchard-protocol key from a BIP-39 seed phrase (ZIP 32,
+    /// coin type 1 = testnet). Orchard receivers receive into Ironwood after
+    /// NU6.3, so this is the key behind the same seed in Zkool or Zingo.
+    pub fn from_mnemonic(name: &str, phrase: &str, account: u32, birthday: u64) -> Result<Self> {
+        let m = bip39::Mnemonic::parse(phrase.trim()).map_err(|e| anyhow!("bad seed phrase: {e}"))?;
+        let account = voting_crypto_deps::zip32::AccountId::try_from(account).map_err(|_| anyhow!("bad account index"))?;
+        let sk = SpendingKey::from_zip32_seed(&m.to_seed(""), 1, account).map_err(|e| anyhow!("deriving the key: {e:?}"))?;
+        Ok(Wallet { name: name.into(), spending_key: hex::encode(sk.to_bytes()), notes: vec![], history: vec![], birthday })
+    }
+
+    /// Find this wallet's Ironwood notes in testnet chain data, and which are
+    /// spent. Keeps reserve marks on notes found again. Returns notes found.
+    pub fn scan(&mut self, ledger: &Ledger) -> Result<usize> {
+        let fvk = self.fvk()?;
+        let ivks = [
+            (false, PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::External))),
+            (true, PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::Internal))),
+        ];
+        let reserve: std::collections::HashSet<String> = self.notes.iter().filter(|n| n.reserve).map(|n| n.cmx.clone()).collect();
+        let spent = ledger.nullifier_heights();
+        let mut notes = vec![];
+        for it in ledger.scan_from(self.birthday) {
+            let (Some(nf), Some(cmx)) = (Option::from(Nullifier::from_bytes(it.nf)), Option::from(ExtractedNoteCommitment::from_bytes(it.cmx))) else {
+                continue;
+            };
+            let act = CompactAction::from_parts(nf, cmx, EphemeralKeyBytes(it.out.epk), it.out.ct);
+            let dom = IronwoodDomain::for_compact_action(&act);
+            for (internal, ivk) in &ivks {
+                if let Some((note, _)) = try_compact_note_decryption(&dom, ivk, &act) {
+                    let mut wn = wallet_note(&note, it.height, it.position, false, "", "");
+                    wn.internal = *internal;
+                    wn.reserve = reserve.contains(&wn.cmx);
+                    wn.spent_height = spent.get(&note.nullifier(&fvk).to_bytes()).copied();
+                    notes.push(wn);
+                    break;
+                }
+            }
+        }
+        self.notes = notes;
+        Ok(self.notes.len())
+    }
+
+    /// Mark the unspent note of exactly `amount` (or the one with this cmx
+    /// prefix) as the reserve note. For testnet, where the fund's everyday
+    /// wallet made the note by sending exactly T to itself.
+    pub fn mark_reserve(&mut self, amount: u64, cmx: Option<&str>) -> Result<&WalletNote> {
+        let hits: Vec<usize> = (0..self.notes.len())
+            .filter(|&i| {
+                let n = &self.notes[i];
+                n.spent_height.is_none() && n.value_zat == amount && cmx.is_none_or(|c| n.cmx.starts_with(c))
+            })
+            .collect();
+        match hits.as_slice() {
+            [i] => {
+                for n in &mut self.notes {
+                    n.reserve = false;
+                }
+                self.notes[*i].reserve = true;
+                Ok(&self.notes[*i])
+            }
+            [] => Err(anyhow!("{} has no unspent note of exactly {} ZEC (send exactly that amount to itself, then `zsolv wallet scan`)", self.name, zec(amount))),
+            _ => Err(anyhow!("{} has {} unspent notes of exactly {} ZEC: pick one with --cmx", self.name, hits.len(), zec(amount))),
+        }
     }
 
     pub fn sk(&self) -> Result<SpendingKey> {
@@ -132,6 +207,7 @@ fn wallet_note(note: &Note, height: u64, position: u64, reserve: bool, memo: &st
         reserve,
         memo: memo.into(),
         counterparty: counterparty.into(),
+        internal: false,
     }
 }
 
@@ -151,7 +227,7 @@ pub fn transfer(ledger: &mut Ledger, t: Transfer) -> Result<u64> {
     let height = ledger.tip() + 1;
     let mut nullifiers = vec![];
     let mut commitments = vec![];
-    let mut position = ledger.blocks.iter().map(|b| b.commitments.len() as u64).sum::<u64>();
+    let mut position = ledger.commitment_count();
     let to_addr = t.to.address()?;
     let to_name = t.to.name.clone();
 
@@ -224,7 +300,7 @@ pub fn transfer(ledger: &mut Ledger, t: Transfer) -> Result<u64> {
 pub fn make_reserve(ledger: &mut Ledger, w: &mut Wallet, amount: u64) -> Result<u64> {
     let height = ledger.tip() + 1;
     let fvk = w.fvk()?;
-    let mut position = ledger.blocks.iter().map(|b| b.commitments.len() as u64).sum::<u64>();
+    let mut position = ledger.commitment_count();
     let mut idx: Vec<usize> = (0..w.notes.len()).filter(|&i| w.notes[i].spent_height.is_none() && !w.notes[i].reserve).collect();
     idx.sort_by_key(|&i| std::cmp::Reverse(w.notes[i].value_zat));
     let (mut sum, mut picked) = (0u64, vec![]);
