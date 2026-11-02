@@ -1,7 +1,9 @@
 # The live page on any VPS with ports 80/443 open and DNS for $DOMAIN pointing at it:
 #   DOMAIN=reserves.example.org docker compose up -d --build
-# Caddy gets and renews the HTTPS certificate. `sync` keeps testnet chain data
-# current; the registry reloads it when the file changes.
+# Caddy gets and renews the HTTPS certificate (see Caddyfile). `sync` keeps
+# testnet chain data current; the registry reloads it when the file changes.
+# To close registration to your own funds:
+#   docker compose exec registry zsolv registry allow --id mill --key <fund public key>
 services:
   registry:
     build: .
@@ -23,11 +25,13 @@ services:
   caddy:
     image: caddy:2
     restart: unless-stopped
-    command: ["caddy", "reverse-proxy", "--from", "${DOMAIN:?set DOMAIN}", "--to", "registry:8080"]
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN}
     ports:
       - "80:80"
       - "443:443"
     volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
 
 volumes:

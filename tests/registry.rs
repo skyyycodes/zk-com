@@ -4,6 +4,7 @@ use zsolv::attest::{prove, round_message, ProveRequest};
 use zsolv::fundkey::FundKey;
 use zsolv::ledger::Ledger;
 use zsolv::registry::{fund_view, sign_profile, Obligation, Profile, Registry};
+use zsolv::store::DataDir;
 use zsolv::util::COIN;
 use zsolv::wallet::{make_reserve, transfer, Transfer, Wallet};
 
@@ -55,6 +56,64 @@ fn profile_changes_need_the_fund_key() {
 }
 
 #[test]
+fn profiles_stay_within_bounds() {
+    let mut reg = Registry::new(REG);
+    let k = FundKey::generate("mill");
+    let try_profile = |reg: &mut Registry, p: Profile, seq| reg.register(sign_profile(REG, &p, &k, seq).unwrap());
+
+    let mut p = profile("mill", &"x".repeat(121));
+    assert!(try_profile(&mut reg, p.clone(), 1).unwrap_err().to_string().contains("name"));
+    p.name = "Mill".into();
+    p.description = "y".repeat(2001);
+    assert!(try_profile(&mut reg, p.clone(), 1).unwrap_err().to_string().contains("description"));
+    p.description.clear();
+    // obligations that would overflow the total, or exceed all the ZEC there is
+    p.obligations = vec![Obligation { label: "a".into(), zat: u64::MAX }, Obligation { label: "b".into(), zat: 1 }];
+    assert!(try_profile(&mut reg, p.clone(), 1).unwrap_err().to_string().contains("21 million"));
+    p.obligations = vec![Obligation { label: "a".into(), zat: 21_000_001 * COIN }];
+    assert!(try_profile(&mut reg, p.clone(), 1).is_err());
+    p.obligations = (0..51).map(|i| Obligation { label: format!("o{i}"), zat: COIN }).collect();
+    assert!(try_profile(&mut reg, p.clone(), 1).is_err());
+    p.obligations = vec![Obligation { label: "Strike pay".into(), zat: 480 * COIN }];
+    p.zec_usd = Some(-1.0);
+    assert!(try_profile(&mut reg, p.clone(), 1).unwrap_err().to_string().contains("zec_usd"));
+    p.zec_usd = Some(40.0);
+    try_profile(&mut reg, p, 1).unwrap();
+    // ids: charset and length
+    let long = "m".repeat(65);
+    let kl = FundKey::generate(&long);
+    assert!(reg.register(sign_profile(REG, &profile(&long, "x"), &kl, 1).unwrap()).is_err());
+    let kb = FundKey::generate("a b");
+    assert!(reg.register(sign_profile(REG, &profile("a b", "x"), &kb, 1).unwrap()).is_err());
+}
+
+#[test]
+fn closed_registration_admits_only_listed_keys() {
+    let mut reg = Registry::new(REG);
+    let mill = FundKey::generate("mill");
+    let other = FundKey::generate("mill");
+    reg.allowlist = Some([("mill".to_string(), mill.public().unwrap())].into());
+    let e = reg.register(sign_profile(REG, &profile("mill", "Squatter"), &other, 1).unwrap()).unwrap_err();
+    assert!(e.to_string().contains("by invitation"), "{e}");
+    let spam = FundKey::generate("spam");
+    assert!(reg.register(sign_profile(REG, &profile("spam", "Buy now"), &spam, 1).unwrap()).is_err());
+    reg.register(sign_profile(REG, &profile("mill", "Mill Workers' Strike Fund"), &mill, 1).unwrap()).unwrap();
+    // a listed fund still updates as usual
+    reg.register(sign_profile(REG, &profile("mill", "Mill Workers' Strike Fund (wk 2)"), &mill, 2).unwrap()).unwrap();
+}
+
+#[test]
+fn registry_state_must_match_the_registry_id() {
+    let dir = std::env::temp_dir().join(format!("zsolv-regid-{}", std::process::id()));
+    let d = DataDir(dir.clone());
+    Registry::new(REG).save(&d).unwrap();
+    assert!(Registry::load_or_new(&d, REG).is_ok());
+    let e = Registry::load_or_new(&d, "another-registry").unwrap_err();
+    assert!(e.to_string().contains("not another-registry"), "{e}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn only_the_fund_key_publishes_rounds() {
     let log = |_: &str| {};
     let mut l = Ledger::new();
@@ -89,8 +148,8 @@ fn only_the_fund_key_publishes_rounds() {
     let mut weekly = profile("mill", "Mill Workers' Strike Fund");
     weekly.max_proof_age_blocks = 100;
     reg.register(sign_profile(REG, &weekly, &mill_key, 2).unwrap()).unwrap();
-    assert_eq!(fund_view(&reg.funds["mill"], h + 100, &reg.events).status, "green");
-    let stale = fund_view(&reg.funds["mill"], h + 101, &reg.events);
+    assert_eq!(fund_view(&reg.funds["mill"], h + 100, &reg.events, "ZEC").status, "green");
+    let stale = fund_view(&reg.funds["mill"], h + 101, &reg.events, "ZEC");
     assert_eq!(stale.status, "amber");
     assert!(stale.status_text.contains("stale"), "{}", stale.status_text);
 
@@ -120,6 +179,16 @@ fn only_the_fund_key_publishes_rounds() {
     // the fund's next round still goes through
     let (ok, why, _) = reg.submit(req("mill", &mill_key, 2, Some(x)).unwrap(), &l).unwrap();
     assert!(ok, "{why}");
+
+    // a later round may not be checked at an earlier block
+    let earlier = prove(ProveRequest {
+        wallet: &fund, ledger: &l, registry: REG.into(), fund_id: "mill".into(), fund_key: &mill_key, round: 3,
+        threshold_zat: 480 * COIN, since: Some(x), at: h - 1, cheat_claim_since: None, log: &log,
+    })
+    .unwrap();
+    let (ok, why, _) = reg.submit(earlier, &l).unwrap();
+    assert!(!ok);
+    assert!(why.contains("before round 2"), "{why}");
 
     // a second fund, signed with its own key, counting the same note: refused and logged
     let shadow = prove(ProveRequest {

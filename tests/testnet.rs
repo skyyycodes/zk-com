@@ -121,5 +121,17 @@ fn seed_wallet_scans_and_proves_on_testnet_shaped_data() {
     let v = verify(&a, &l);
     for ch in &v.checks { eprintln!("{} {} — {}", if ch.ok { "ok  " } else { "FAIL" }, ch.name, ch.detail); }
     assert!(v.ok);
+    assert!(v.checks.iter().any(|c| c.detail == "at least 480 TAZ"), "testnet amounts are TAZ");
+
+    // a reserve note on the wallet's internal (change) address proves too
+    w.mark_reserve(20 * COIN, None).unwrap();
+    assert!(w.notes.iter().find(|n| n.reserve).unwrap().internal);
+    let key = FundKey::generate("change");
+    let c = prove(ProveRequest {
+        wallet: &w, ledger: &l, registry: "zsolv-testnet-registry-1".into(), fund_id: "change".into(), fund_key: &key, round: 1,
+        threshold_zat: 20 * COIN, since: Some(x), at: h, cheat_claim_since: None, log: &log,
+    })
+    .unwrap();
+    assert!(verify(&c, &l).ok);
     let _ = std::fs::remove_dir_all(dir);
 }

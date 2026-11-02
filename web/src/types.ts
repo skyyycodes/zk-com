@@ -42,6 +42,8 @@ export type Status = 'green' | 'amber' | 'red' | 'none'
 
 export interface Fund {
   id: string
+  /** ZEC, or TAZ on testnet. */
+  unit: string
   /** The fund's public key, bound at first registration; signs its profile and rounds. */
   key: string
   name: string
@@ -72,6 +74,7 @@ export interface RegistryState {
   registry: string
   network: string
   pool: string
+  unit: string
   tip: number
   tip_hash: string
   funds: Fund[]

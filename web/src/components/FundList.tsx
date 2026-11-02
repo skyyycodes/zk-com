@@ -15,7 +15,7 @@ export function FundList({ funds, selectedId }: { funds: Fund[]; selectedId: str
             <span className="fund-name">{f.name}</span>
             <span className="fund-sub">
               {f.latest
-                ? `≥ ${zec(f.latest.threshold_zat)} ZEC · since block ${f.latest.since_height}`
+                ? `≥ ${zec(f.latest.threshold_zat)} ${f.unit} · since block ${f.latest.since_height}`
                 : f.last_refusal
                   ? 'submission refused'
                   : 'no proof yet'}

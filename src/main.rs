@@ -6,7 +6,7 @@ use zsolv::attest::{prove, verify, Attestation, ProveRequest};
 use zsolv::fundkey::FundKey;
 use zsolv::ledger::Ledger;
 use zsolv::registry::{sign_profile, Obligation, Profile, Registry};
-use zsolv::store::{read_json, write_json, DataDir};
+use zsolv::store::{read_json, write_json, write_secret_json, DataDir};
 use zsolv::util::{parse_zec, zec};
 use zsolv::wallet::{make_reserve, transfer, Transfer, Wallet};
 
@@ -34,6 +34,11 @@ enum Cmd {
     Testnet {
         #[command(subcommand)]
         cmd: TestnetCmd,
+    },
+    /// Registry operator: who may register new funds.
+    Registry {
+        #[command(subcommand)]
+        cmd: RegistryCmd,
     },
     /// Fund-side wallets (secret: they never leave the fund).
     Wallet {
@@ -95,7 +100,7 @@ enum Cmd {
         at: Option<u64>,
         #[arg(long, default_value_t = 1)]
         round: u64,
-        #[arg(long, default_value = DEFAULT_REGISTRY)]
+        #[arg(long, default_value = DEFAULT_REGISTRY, env = "ZSOLV_REGISTRY")]
         registry: String,
         /// The fund's signing key (default: <data>/funds/<fund-id>.key.json).
         #[arg(long)]
@@ -133,7 +138,7 @@ enum Cmd {
         price_time: Option<String>,
         #[arg(long)]
         url: Option<String>,
-        #[arg(long, default_value = DEFAULT_REGISTRY)]
+        #[arg(long, default_value = DEFAULT_REGISTRY, env = "ZSOLV_REGISTRY")]
         registry: String,
         /// The fund's signing key (default: <data>/funds/<id>.key.json).
         #[arg(long)]
@@ -157,6 +162,9 @@ enum Cmd {
         /// Costly requests (submissions, Verify, root rebuilds) per minute per client; 0 = no limit.
         #[arg(long, default_value_t = 10, env = "ZSOLV_RATE_LIMIT")]
         rate_limit: u32,
+        /// Root rebuilds at new heights per hour across all clients (each ~10-20 s on testnet); 0 = no limit.
+        #[arg(long, default_value_t = 12, env = "ZSOLV_REBUILDS_PER_HOUR")]
+        rebuilds_per_hour: u32,
         /// Behind your own reverse proxy: identify clients by X-Forwarded-For.
         #[arg(long, env = "ZSOLV_TRUST_PROXY")]
         trust_proxy: bool,
@@ -206,6 +214,25 @@ enum TestnetCmd {
 }
 
 #[derive(Subcommand)]
+enum RegistryCmd {
+    /// Let this fund id register with this key. Registration is then closed to unlisted ids.
+    Allow {
+        #[arg(long)]
+        id: String,
+        /// The fund's public key (`zsolv fund` prints it when it creates the key).
+        #[arg(long)]
+        key: String,
+        #[arg(long, default_value = DEFAULT_REGISTRY, env = "ZSOLV_REGISTRY")]
+        registry: String,
+    },
+    /// Let anyone register an unused fund id again.
+    Open {
+        #[arg(long, default_value = DEFAULT_REGISTRY, env = "ZSOLV_REGISTRY")]
+        registry: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum WalletCmd {
     New { name: String },
     /// Testnet: derive the wallet from the fund's seed phrase (the one its everyday wallet uses).
@@ -247,10 +274,13 @@ fn run() -> Result<()> {
     match cli.cmd {
         Cmd::Devnet { cmd } => match cmd {
             DevnetCmd::Init { force } => {
-                if d.ledger().exists() && !force {
-                    bail!("chain data already exists at {} (use --force to reset)", d.ledger().display());
+                if d.testnet_ledger().exists() {
+                    bail!("{} holds testnet chain data: use another --data directory for the devnet", d.0.display());
                 }
-                Ledger::new().save(&d.ledger())?;
+                if d.devnet_ledger().exists() && !force {
+                    bail!("chain data already exists at {} (use --force to reset)", d.devnet_ledger().display());
+                }
+                Ledger::new().save(&d.devnet_ledger())?;
                 println!("devnet initialised at block 0");
             }
             DevnetCmd::Mine { blocks } => {
@@ -295,7 +325,32 @@ fn run() -> Result<()> {
                     l.truncate(l.tip().saturating_sub(r).max(l.start_height()))?;
                 }
                 let mut c = zsolv::lightwalletd::Lightwalletd::connect(&server)?;
-                let target = to.unwrap_or(c.tip()?.saturating_sub(confirmations));
+                let server_tip = c.tip()?;
+                let target = to.unwrap_or(server_tip.saturating_sub(confirmations));
+                if !l.blocks.is_empty() {
+                    // After a reorg: step back until our block matches the server's, then drop the rest.
+                    let (mut h, mut step, mut differs) = (l.tip().min(server_tip), 1u64, false);
+                    loop {
+                        let mut theirs = None;
+                        c.blocks(h, h, |b| {
+                            theirs = Some(zsolv::lightwalletd::display_hash(&b.hash));
+                            Ok(())
+                        })?;
+                        if theirs.as_deref() == Some(l.block(h)?.hash.as_str()) {
+                            break;
+                        }
+                        differs = true;
+                        if h == l.start_height() {
+                            bail!("the local chain data does not match the server's even at block {h}: delete {} and sync again", path.display());
+                        }
+                        h = h.saturating_sub(step).max(l.start_height());
+                        step *= 2;
+                    }
+                    if differs {
+                        eprintln!("reorg: the server's chain differs above block {h}; dropping local blocks {}..={}", h + 1, l.tip());
+                        l.truncate(h)?;
+                    }
+                }
                 let mut next = if l.blocks.is_empty() { zsolv::ledger::TESTNET_IRONWOOD_ACTIVATION } else { l.tip() + 1 };
                 let t0 = std::time::Instant::now();
                 let mut unsaved = 0;
@@ -317,19 +372,38 @@ fn run() -> Result<()> {
                 println!("testnet chain data: blocks {}..={}, {} Ironwood actions, at {}", l.start_height(), l.tip(), l.commitment_count(), path.display());
             }
         },
+        Cmd::Registry { cmd } => match cmd {
+            RegistryCmd::Allow { id, key, registry } => {
+                zsolv::fundkey::check_key(&key)?;
+                let mut reg = Registry::load_or_new(&d, &registry)?;
+                let n = {
+                    let allow = reg.allowlist.get_or_insert_with(Default::default);
+                    allow.insert(id.clone(), key);
+                    allow.len()
+                };
+                reg.save(&d)?;
+                println!("registry {registry}: fund {id} may register with that key; registration is closed to the {n} listed id(s)");
+            }
+            RegistryCmd::Open { registry } => {
+                let mut reg = Registry::load_or_new(&d, &registry)?;
+                reg.allowlist = None;
+                reg.save(&d)?;
+                println!("registry {registry}: anyone may register an unused fund id");
+            }
+        },
         Cmd::Wallet { cmd } => match cmd {
             WalletCmd::New { name } => {
                 if d.wallet(&name).exists() {
                     bail!("wallet {name} exists");
                 }
-                write_json(&d.wallet(&name), &Wallet::generate(&name))?;
+                write_secret_json(&d.wallet(&name), &Wallet::generate(&name))?;
                 println!("created wallet {name}");
             }
             WalletCmd::Import { name, mnemonic, account, birthday } => {
                 if d.wallet(&name).exists() {
                     bail!("wallet {name} exists");
                 }
-                write_json(&d.wallet(&name), &Wallet::from_mnemonic(&name, &mnemonic, account, birthday)?)?;
+                write_secret_json(&d.wallet(&name), &Wallet::from_mnemonic(&name, &mnemonic, account, birthday)?)?;
                 println!("imported wallet {name} (account {account}, scanning from block {birthday}); run `zsolv wallet scan {name}`");
             }
             WalletCmd::Scan { name } => {
@@ -340,7 +414,7 @@ fn run() -> Result<()> {
                 let mut w = load_wallet(&d, &name)?;
                 let t0 = std::time::Instant::now();
                 let n = w.scan(&l)?;
-                write_json(&d.wallet(&name), &w)?;
+                write_secret_json(&d.wallet(&name), &w)?;
                 eprintln!("scanned blocks {}..={} in {:.1?}: {n} notes", w.birthday.max(l.start_height()), l.tip(), t0.elapsed());
                 print!("{}", w.summary(l.tip()));
             }
@@ -363,12 +437,12 @@ fn run() -> Result<()> {
                 let mut fw = load_wallet(&d, f)?;
                 let label = if label == "anonymous donor" { f.clone() } else { label };
                 let h = transfer(&mut l, Transfer { from: Some(&mut fw), from_label: label, to: &mut tw, amount, memo, reserve })?;
-                write_json(&d.wallet(f), &fw)?;
+                write_secret_json(&d.wallet(f), &fw)?;
                 h
             } else {
                 transfer(&mut l, Transfer { from: None, from_label: label, to: &mut tw, amount, memo, reserve })?
             };
-            write_json(&d.wallet(&to), &tw)?;
+            write_secret_json(&d.wallet(&to), &tw)?;
             l.save(&d.ledger())?;
             println!("block {h}: {} ZEC → {to}{}", zec(amount), if reserve { " (reserve note)" } else { "" });
         }
@@ -378,12 +452,12 @@ fn run() -> Result<()> {
             let amount = parse_zec(&amount)?;
             if !l.is_devnet() {
                 let n = w.mark_reserve(amount, cmx.as_deref())?;
-                println!("reserve note {} of exactly {} ZEC, received at block {}", zsolv::util::short(&n.cmx), zec(amount), n.height);
-                write_json(&d.wallet(&wallet), &w)?;
+                println!("reserve note {} of exactly {} {}, received at block {}", zsolv::util::short(&n.cmx), zec(amount), l.unit(), n.height);
+                write_secret_json(&d.wallet(&wallet), &w)?;
                 return Ok(());
             }
             let h = make_reserve(&mut l, &mut w, amount)?;
-            write_json(&d.wallet(&wallet), &w)?;
+            write_secret_json(&d.wallet(&wallet), &w)?;
             l.save(&d.ledger())?;
             println!("block {h}: reserve note of exactly {} ZEC created in {wallet}", zec(amount));
         }
@@ -430,8 +504,8 @@ fn run() -> Result<()> {
             let out = out.unwrap_or_else(|| PathBuf::from(format!("{fund_id}-round{round}.json")));
             write_json(&out, &a)?;
             println!(
-                "attestation written to {}: at least {} ZEC, held since block {}, checked at block {}",
-                out.display(), zec(a.threshold_zat), a.since_height, a.at_height
+                "attestation written to {}: at least {} {}, held since block {}, checked at block {}",
+                out.display(), zec(a.threshold_zat), l.unit(), a.since_height, a.at_height
             );
         }
         Cmd::Verify { file } => {
@@ -442,8 +516,8 @@ fn run() -> Result<()> {
                 println!("{} {:<52} {}", if c.ok { "✔" } else { "✘" }, c.name, c.detail);
             }
             if v.ok {
-                println!("\nVALID: {} holds at least {} ZEC, held since block {}, checked at block {} (tip {}).",
-                    a.fund_id, zec(a.threshold_zat), a.since_height, a.at_height, v.tip);
+                println!("\nVALID: {} holds at least {} {}, held since block {}, checked at block {} (tip {}).",
+                    a.fund_id, zec(a.threshold_zat), l.unit(), a.since_height, a.at_height, v.tip);
             } else {
                 println!("\nINVALID");
                 std::process::exit(1);
@@ -462,7 +536,7 @@ fn run() -> Result<()> {
                 load_fund_key(&d, &id, Some(key_path))?
             } else {
                 let k = FundKey::generate(&id);
-                write_json(&key_path, &k)?;
+                write_secret_json(&key_path, &k)?;
                 eprintln!("created fund key {} at {} (secret: keep it with the wallet)", k.public()?, key_path.display());
                 k
             };
@@ -502,8 +576,8 @@ fn run() -> Result<()> {
             }
             println!("{} {}", if code == 200 { "ACCEPTED:" } else { "REFUSED:" }, v["reason"].as_str().unwrap_or(""));
         }
-        Cmd::Serve { addr, registry, web, rate_limit, trust_proxy } => {
-            zsolv::registry::serve(d, registry, &addr, web, zsolv::registry::RateLimit { per_minute: rate_limit, trust_proxy })?
+        Cmd::Serve { addr, registry, web, rate_limit, rebuilds_per_hour, trust_proxy } => {
+            zsolv::registry::serve(d, registry, &addr, web, zsolv::registry::RateLimit { per_minute: rate_limit, rebuilds_per_hour, trust_proxy })?
         }
         Cmd::ViewingKeyDemo { wallet, fund_id } => {
             let w = load_wallet(&d, &wallet)?;

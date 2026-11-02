@@ -75,7 +75,7 @@ That builds everything, creates a local Ironwood devnet, and plays out the demo:
 
 Then open http://127.0.0.1:8080.
 
-Tests (the Tuesday gate plus the cheats, with real proofs, about 12 s):
+Tests (the Tuesday gate plus the cheats, registry rules, the testnet path and malformed input, with real proofs, about 10 s):
 
 ```bash
 cargo test --release
@@ -111,13 +111,24 @@ zsolv reserve --wallet mill --amount 480 # marks the note of exactly 480 TAZ the
 
 ### Deploy
 
-`Dockerfile` builds the registry and web app. `compose.yaml` runs it with a sync loop and Caddy for HTTPS on any VPS:
+`Dockerfile` builds the registry and web app. `compose.yaml` runs it with a sync loop and Caddy (`Caddyfile`) for HTTPS on any VPS with ports 80 and 443 open:
 
 ```bash
 DOMAIN=reserves.example.org docker compose up -d --build
 ```
 
-Costly requests (submissions, Verify, root rebuilds) are limited per client (`--rate-limit`, default 10 a minute).
+The first sync takes about 6 minutes; until then the API answers "no chain data".
+
+By default anyone may register an unused fund id, and every fund is listed on the page. For a public page, close registration to your own funds (`zsolv fund` prints a fund's public key when it creates it):
+
+```bash
+docker compose exec registry zsolv registry allow --id mill --key <public key>
+```
+
+Load limits:
+- POSTs (submissions, Verify, profile updates) are limited per client (`--rate-limit`, default 10 a minute). They run one at a time on a worker, so pages keep loading during a proof check.
+- Root rebuilds at new heights, 10 to 20 s each on testnet, are limited across all clients (`--rebuilds-per-hour`, default 12).
+- Keep the registry behind the proxy: Caddy reads each request whole before passing it on.
 
 ### CLI
 
@@ -133,7 +144,8 @@ zsolv verify <attestation.json>
 zsolv fund --id <id> --name <name> --obligation "label=ZEC" [--min-held-blocks N] [--max-proof-age-blocks N] [--url URL] [--fund-key file]
                                                   # first run creates <data>/funds/<id>.key.json (secret)
 zsolv submit <attestation.json> [--url URL]
-zsolv serve [--addr 127.0.0.1:8080] [--web web/dist] [--rate-limit N] [--trust-proxy]
+zsolv serve [--addr 127.0.0.1:8080] [--web web/dist] [--rate-limit N] [--rebuilds-per-hour N] [--trust-proxy]
+zsolv registry allow --id <id> --key <public key> | open   # close registration to listed funds, or reopen it
 ```
 
 ### API
@@ -146,7 +158,7 @@ zsolv serve [--addr 127.0.0.1:8080] [--web web/dist] [--rate-limit N] [--trust-p
 | POST | `/api/funds/:id/verify` | Re-verify the latest attestation now |
 | POST | `/api/funds` | Register or update a fund profile, signed by the fund key |
 | POST | `/api/attest` | Submit an attestation, signed by the fund key |
-| GET | `/api/roots/:height` | Tree and nullifier-IMT roots at a height |
+| GET | `/api/roots/:height` | Tree and nullifier-IMT roots at a height this registry has computed |
 
 ## Built on
 
@@ -170,7 +182,8 @@ Pre-hack work (allowed by WebZero): this repository as of 1 Nov 2026. Work done 
 - The circuits are used outside the voting protocol they were designed and reviewed for. Check their audit status before mainnet.
 - At most 5 reserve notes per proof (one reserve note of exactly T is the intended use).
 - The registry nullifier links one fund's own rounds, by design. T, the heights and the timing are public.
-- Fund ids are first come, first served: whoever registers an id first binds its key. There is no key rotation or recovery yet; a lost fund key means registering a new id.
+- By default X is the block where the reserve note was created. On a quiet chain that block points at the fund's own transaction. Pass a later `--since` to avoid that.
+- Fund ids are first come, first served unless the operator closes registration: whoever registers an id first binds its key. There is no key rotation or recovery yet; a lost fund key means registering a new id.
 - The registry is a single process with a JSON file. The Verify button runs on the registry; independent checks use `zsolv verify`.
 
 ## Roadmap

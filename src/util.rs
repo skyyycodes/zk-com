@@ -11,6 +11,9 @@ pub const COIN: u64 = 100_000_000;
 /// `floor(v_total / 12_500_000)` (0.125 ZEC steps) and rules out over-claiming.
 pub const STEP_ZAT: u64 = 12_500_000;
 
+/// All the ZEC there will ever be, in zatoshi.
+pub const MAX_MONEY: u64 = 21_000_000 * COIN;
+
 pub fn fhex(f: &pallas::Base) -> String {
     hex::encode(f.to_repr())
 }

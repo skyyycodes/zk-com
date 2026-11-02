@@ -5,3 +5,5 @@ attestations
 web/node_modules
 web/dist
 .git
+snapshots
+attestations-testnet

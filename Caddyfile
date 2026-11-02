@@ -1,0 +1,28 @@
+# HTTPS in front of the registry. Caddy reads each request whole, within the
+# timeouts, before passing it on, so a slow client can't hold the registry.
+{
+	servers {
+		timeouts {
+			read_header 10s
+			read_body 30s
+			write 2m
+			idle 2m
+		}
+	}
+}
+
+{$DOMAIN} {
+	encode gzip
+	request_body {
+		max_size 8MB
+	}
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		X-Frame-Options DENY
+		-Server
+	}
+	reverse_proxy registry:8080 {
+		request_buffers 8MB
+	}
+}

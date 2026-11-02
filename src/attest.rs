@@ -244,8 +244,9 @@ fn build_snapshot(
 pub fn prove(req: ProveRequest) -> Result<Attestation> {
     let log = req.log;
     let t = req.threshold_zat;
+    let unit = req.ledger.unit();
     if t == 0 || t % STEP_ZAT != 0 {
-        bail!("threshold must be a positive multiple of 0.125 ZEC (got {} ZEC)", zec(t));
+        bail!("threshold must be a positive multiple of 0.125 {unit} (got {} {unit})", zec(t));
     }
     if req.fund_key.fund_id != req.fund_id {
         bail!("the fund key is for {}, not {}", req.fund_key.fund_id, req.fund_id);
@@ -261,11 +262,11 @@ pub fn prove(req: ProveRequest) -> Result<Attestation> {
     }
     let total: u64 = reserve.iter().map(|n| n.value_zat).sum();
     if total < t {
-        bail!("reserve notes hold {} ZEC, below the threshold {} ZEC", zec(total), zec(t));
+        bail!("reserve notes hold {} {unit}, below the threshold {} {unit}", zec(total), zec(t));
     }
     if total >= t + STEP_ZAT {
         bail!(
-            "reserve notes hold {} ZEC; the proof would reveal {} ZEC, more than T = {} ZEC. Keep a reserve note of exactly T.",
+            "reserve notes hold {} {unit}; the proof would reveal {} {unit}, more than T = {} {unit}. Keep a reserve note of exactly T.",
             zec(total), zec(total / STEP_ZAT * STEP_ZAT), zec(t)
         );
     }
@@ -409,9 +410,9 @@ fn check_snapshot(a: &Attestation, s: &Snapshot, label: &str, ledger: &Ledger, r
         }
         let proven = o.steps * STEP_ZAT;
         if proven < a.threshold_zat {
-            bail!("notes prove only {} ZEC < T = {} ZEC", zec(proven), zec(a.threshold_zat));
+            bail!("notes prove only {} {unit} < T = {} {unit}", zec(proven), zec(a.threshold_zat), unit = ledger.unit());
         }
-        Ok(format!("at least {} ZEC", zec(proven)))
+        Ok(format!("at least {} {}", zec(proven), ledger.unit()))
     })());
 
     c.add(&format!("{label}: spend-auth signature over the round message"), (|| {
@@ -439,9 +440,9 @@ pub fn verify(a: &Attestation, ledger: &Ledger) -> Verdict {
             bail!("heights inconsistent");
         }
         if a.threshold_zat == 0 || a.threshold_zat % STEP_ZAT != 0 {
-            bail!("threshold must be a positive multiple of 0.125 ZEC");
+            bail!("threshold must be a positive multiple of 0.125 {}", ledger.unit());
         }
-        Ok(format!("round {}, T = {} ZEC", a.round, zec(a.threshold_zat)))
+        Ok(format!("round {}, T = {} {}", a.round, zec(a.threshold_zat), ledger.unit()))
     })());
     c.add("fund key signature over the round message", (|| {
         verify_sig(&a.fund_key, &a.message, &a.fund_signature)

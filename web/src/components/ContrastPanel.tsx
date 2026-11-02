@@ -25,7 +25,7 @@ export function ContrastPanel({ fund }: { fund: Fund }) {
           {vk === null && <p className="muted">No demo export for this fund.</p>}
           {vk && (
             <>
-              <div className="balance">Exact balance: {zec(vk.balance_zat)} ZEC</div>
+              <div className="balance">Exact balance: {zec(vk.balance_zat)} {fund.unit}</div>
               <div className="scroll">
                 <table>
                   <tbody>
@@ -55,7 +55,7 @@ export function ContrastPanel({ fund }: { fund: Fund }) {
           <h4>What Z-Solvency publishes</h4>
           <div className="line">
             {latest
-              ? `≥ ${zec(latest.threshold_zat)} ZEC · held since block ${latest.since_height} · checked at block ${latest.at_height} · signed by the fund`
+              ? `≥ ${zec(latest.threshold_zat)} ${fund.unit} · held since block ${latest.since_height} · checked at block ${latest.at_height} · signed by the fund`
               : '—'}
           </div>
           <p className="muted small">

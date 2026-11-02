@@ -2,13 +2,23 @@
 # Builds the hack-day demo from scratch on a local Ironwood devnet:
 #   one fund passing, a borrowed-coins fund flagged, a reused note refused.
 # Usage: scripts/demo.sh            (starts the registry on :8080 and leaves it running)
+# It wipes and rebuilds its data directory: DEMO_DATA, default ./data. An
+# inherited ZSOLV_DATA is ignored on purpose, so it never wipes testnet data.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo build --release -q
 ( cd web && { [ -d node_modules ] || npm ci --no-audit --no-fund; } && npm run build --silent >/dev/null )
 Z="./target/release/zsolv"
-export ZSOLV_DATA="${ZSOLV_DATA:-data}"
+export ZSOLV_DATA="${DEMO_DATA:-data}"
 URL="${URL:-http://127.0.0.1:8080}"
+if [ -e "$ZSOLV_DATA/chain/ledger.bin" ]; then
+  echo "refusing to wipe $ZSOLV_DATA: it holds testnet chain data (and maybe fund keys). Set DEMO_DATA to another directory." >&2
+  exit 1
+fi
+if curl -s "$URL/api/state" >/dev/null 2>&1 && ! curl -s "$URL/api/state" | grep -q '"network":"zsolv-devnet"'; then
+  echo "a registry that is not the devnet one is running at $URL; stop it first or set URL" >&2
+  exit 1
+fi
 rm -rf "$ZSOLV_DATA" attestations && mkdir -p attestations
 
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }

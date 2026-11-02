@@ -62,6 +62,26 @@ fn gate_and_cheats() {
     t.message = zsolv::attest::round_message(&t);
     assert!(!verify(&t, &l).ok);
 
+    // malformed fields are refused, never a panic (the registry runs this on anyone's input)
+    let bad: Vec<(&str, Box<dyn Fn(&mut zsolv::attest::Attestation)>)> = vec![
+        ("truncated proof", Box::new(|t| t.at.proof.truncate(t.at.proof.len() / 2))),
+        ("empty proof", Box::new(|t| t.at.proof.clear())),
+        ("non-hex proof", Box::new(|t| t.since.proof = "zz".repeat(10))),
+        ("bad rk", Box::new(|t| t.at.rk = "ff".repeat(32))),
+        ("four nullifiers", Box::new(|t| { t.at.registry_nullifiers.pop(); })),
+        ("huge steps", Box::new(|t| t.at.van_opening.steps = u64::MAX)),
+        ("short signature", Box::new(|t| t.at.signature.truncate(10))),
+        ("height above tip", Box::new(|t| { t.at.height = 1 << 40; t.at_height = 1 << 40; })),
+        ("non-hex fund key", Box::new(|t| t.fund_key = "not a key".into())),
+        ("non-hex block hash", Box::new(|t| t.at_block_hash = "é".repeat(40))),
+    ];
+    for (what, f) in &bad {
+        let mut t = a.clone();
+        f(&mut t);
+        t.message = zsolv::attest::round_message(&t);
+        assert!(!verify(&t, &l).ok, "{what} must not verify");
+    }
+
     // tamper: swap in another fund key without its signature
     let mut t = a.clone();
     t.fund_key = key("quick").public().unwrap();

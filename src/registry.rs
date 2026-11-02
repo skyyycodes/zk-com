@@ -4,19 +4,24 @@
 //!
 //! The first registration of a fund id binds the fund's public key. After
 //! that, profile changes and rounds are accepted only when that key signs
-//! them; anything else is refused without touching the fund's page.
+//! them; anything else is refused without touching the fund's page. An
+//! operator can close registration to listed (id, key) pairs.
+//!
+//! Requests that take seconds (proof checks, root rebuilds) run one at a
+//! time on a worker thread, so the pages keep loading meanwhile.
 
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::attest::{round_message, verify, Attestation, Verdict, VERSION};
 use crate::fundkey::{verify_sig, FundKey};
 use crate::ledger::Ledger;
 use crate::store::{read_json, write_json, DataDir};
-use crate::util::{short, zec};
+use crate::util::{short, zec, MAX_MONEY};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Obligation {
@@ -105,14 +110,65 @@ pub struct Registry {
     /// registry nullifier → fund id that first counted it.
     pub nullifier_owner: BTreeMap<String, String>,
     pub events: Vec<Event>,
+    /// Closed registration: new fund ids only with these keys (id → public
+    /// key). None: anyone may register an unused id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowlist: Option<BTreeMap<String, String>>,
+}
+
+const MAX_ID: usize = 64;
+const MAX_NAME: usize = 120;
+const MAX_TEXT: usize = 2000;
+const MAX_LABEL: usize = 200;
+const MAX_OBLIGATIONS: usize = 50;
+/// The event log keeps the most recent entries only.
+pub const MAX_EVENTS: usize = 2000;
+
+/// What a profile may say: keeps the page readable and the totals in range.
+pub fn check_profile(p: &Profile) -> Result<()> {
+    if p.id.is_empty() || p.id.len() > MAX_ID || !p.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        bail!("fund id must be 1 to {MAX_ID} letters, digits and dashes");
+    }
+    let n = |s: &str| s.chars().count();
+    if p.name.trim().is_empty() || n(&p.name) > MAX_NAME {
+        bail!("name must be 1 to {MAX_NAME} characters");
+    }
+    if n(&p.description) > MAX_TEXT {
+        bail!("description must be at most {MAX_TEXT} characters");
+    }
+    if p.obligations.len() > MAX_OBLIGATIONS {
+        bail!("at most {MAX_OBLIGATIONS} obligations");
+    }
+    let mut total = 0u64;
+    for o in &p.obligations {
+        if n(&o.label) > MAX_LABEL {
+            bail!("obligation labels must be at most {MAX_LABEL} characters");
+        }
+        total = total.checked_add(o.zat).filter(|t| *t <= MAX_MONEY).ok_or_else(|| anyhow!("obligations add up to more than 21 million ZEC"))?;
+    }
+    if p.price_time.as_deref().is_some_and(|t| n(t) > MAX_NAME) {
+        bail!("price_time must be at most {MAX_NAME} characters");
+    }
+    if p.zec_usd.is_some_and(|x| !(x.is_finite() && x >= 0.0)) {
+        bail!("zec_usd must be a non-negative number");
+    }
+    Ok(())
 }
 
 impl Registry {
     pub fn new(id: &str) -> Self {
-        Registry { id: id.into(), funds: BTreeMap::new(), nullifier_owner: BTreeMap::new(), events: vec![] }
+        Registry { id: id.into(), funds: BTreeMap::new(), nullifier_owner: BTreeMap::new(), events: vec![], allowlist: None }
     }
+    /// The registry state in `d`, which must be for registry `id`.
     pub fn load_or_new(d: &DataDir, id: &str) -> Result<Self> {
-        if d.registry().exists() { read_json(&d.registry()) } else { Ok(Self::new(id)) }
+        if !d.registry().exists() {
+            return Ok(Self::new(id));
+        }
+        let r: Self = read_json(&d.registry())?;
+        if r.id != id {
+            bail!("{} holds registry {}, not {id} (pass --registry {} or use another data directory)", d.registry().display(), r.id, r.id);
+        }
+        Ok(r)
     }
     pub fn save(&self, d: &DataDir) -> Result<()> {
         write_json(&d.registry(), self)
@@ -122,11 +178,9 @@ impl Registry {
     /// existing one needs a signature by its bound key and a newer `seq`.
     pub fn register(&mut self, u: ProfileUpdate) -> Result<String> {
         let p: Profile = serde_json::from_str(&u.profile).map_err(|e| anyhow!("bad profile: {e}"))?;
-        if p.id.is_empty() || !p.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-            bail!("fund id must be letters, digits and dashes");
-        }
+        check_profile(&p)?;
         verify_sig(&u.key, &profile_message(&self.id, &p.id, &u.key, u.seq, &u.profile), &u.signature)
-            .map_err(|_| anyhow!("profile signature invalid"))?;
+            .map_err(|_| anyhow!("profile signature invalid (signed for another registry? this is {})", self.id))?;
         let id = p.id.clone();
         match self.funds.get_mut(&id) {
             Some(f) => {
@@ -140,6 +194,11 @@ impl Registry {
                 f.profile_seq = u.seq;
             }
             None => {
+                if let Some(allow) = &self.allowlist {
+                    if allow.get(&id) != Some(&u.key) {
+                        bail!("registration on this registry is by invitation: ask its operator to run `zsolv registry allow --id {id} --key {}`", u.key);
+                    }
+                }
                 self.funds.insert(id.clone(), Fund { profile: p, key: u.key, profile_seq: u.seq, attestations: vec![] });
             }
         }
@@ -148,6 +207,10 @@ impl Registry {
 
     fn event(&mut self, fund_id: &str, accepted: bool, summary: String) {
         self.events.push(Event { time: now(), fund_id: fund_id.into(), accepted, summary });
+        if self.events.len() > MAX_EVENTS {
+            let extra = self.events.len() - MAX_EVENTS;
+            self.events.drain(..extra);
+        }
     }
 
     /// Verify and record an attestation. Returns (accepted, reason, verdict).
@@ -167,6 +230,9 @@ impl Registry {
         if let Some(last) = fund.attestations.last() {
             if a.round <= last.attestation.round {
                 return Ok((false, format!("round {} is not newer than round {} already published", a.round, last.attestation.round), None));
+            }
+            if a.at_height < last.attestation.at_height {
+                return Ok((false, format!("round {} is checked at block {}, before round {}'s block {}", a.round, a.at_height, last.attestation.round, last.attestation.at_height), None));
             }
         }
         if a.registry != self.id {
@@ -195,8 +261,8 @@ impl Registry {
             self.nullifier_owner.insert(n.clone(), fund_id.clone());
         }
         let summary = format!(
-            "round {}: at least {} ZEC, held since block {}, checked at block {}",
-            a.round, zec(a.threshold_zat), a.since_height, a.at_height
+            "round {}: at least {} {}, held since block {}, checked at block {}",
+            a.round, zec(a.threshold_zat), ledger.unit(), a.since_height, a.at_height
         );
         self.event(&fund_id, true, summary.clone());
         self.funds.get_mut(&fund_id).unwrap().attestations.push(StoredAttestation { received_at: now(), attestation: a, verdict: v.clone() });
@@ -212,6 +278,8 @@ pub fn now() -> String {
 #[derive(Serialize)]
 pub struct FundView<'a> {
     pub id: &'a str,
+    /// ZEC, or TAZ on testnet.
+    pub unit: &'static str,
     pub key: &'a str,
     pub name: &'a str,
     pub description: &'a str,
@@ -229,9 +297,9 @@ pub struct FundView<'a> {
     pub last_refusal: Option<String>,
 }
 
-pub fn fund_view<'a>(fund: &'a Fund, tip: u64, events: &[Event]) -> FundView<'a> {
+pub fn fund_view<'a>(fund: &'a Fund, tip: u64, events: &[Event], unit: &'static str) -> FundView<'a> {
     let f = &fund.profile;
-    let obligations_zat: u64 = f.obligations.iter().map(|o| o.zat).sum();
+    let obligations_zat: u64 = f.obligations.iter().fold(0, |t, o| t.saturating_add(o.zat));
     let latest = fund.attestations.last();
     let last_refusal = events.iter().rev().find(|e| e.fund_id == f.id).filter(|e| !e.accepted).map(|e| e.summary.clone());
     let (status, status_text) = match latest {
@@ -248,7 +316,7 @@ pub fn fund_view<'a>(fund: &'a Fund, tip: u64, events: &[Event]) -> FundView<'a>
             } else if f.max_proof_age_blocks > 0 && age > f.max_proof_age_blocks {
                 ("amber", format!("Latest proof is stale: checked {age} blocks ago (block {}); the fund promises a new one every {}", a.at_height, f.max_proof_age_blocks))
             } else if a.threshold_zat < obligations_zat {
-                ("amber", format!("Reserve {} ZEC is below obligations of {} ZEC", zec(a.threshold_zat), zec(obligations_zat)))
+                ("amber", format!("Reserve {} {unit} is below obligations of {} {unit}", zec(a.threshold_zat), zec(obligations_zat)))
             } else if held < f.min_held_blocks {
                 ("amber", format!("Reserve only held for {held} block{} (since block {}); the fund promises {}", if held == 1 { "" } else { "s" }, a.since_height, f.min_held_blocks))
             } else {
@@ -276,6 +344,7 @@ pub fn fund_view<'a>(fund: &'a Fund, tip: u64, events: &[Event]) -> FundView<'a>
     });
     FundView {
         id: &f.id,
+        unit,
         key: &fund.key,
         name: &f.name,
         description: &f.description,
@@ -302,22 +371,58 @@ fn json_resp(code: u16, v: &impl Serialize) -> tiny_http::Response<std::io::Curs
         .with_header("Access-Control-Allow-Origin: *".parse::<tiny_http::Header>().unwrap())
 }
 
-fn handle(d: &DataDir, reg_id: &str, ledger: &Ledger, method: &str, url: &str, body: &str) -> Result<(u16, serde_json::Value)> {
+/// Rebuilding roots at a new height is the one request that costs seconds,
+/// and any registered fund can cause it (registration may be free). Across
+/// all clients, only this many such heights per hour; nothing else waits.
+struct RebuildBudget {
+    per_hour: f64,
+    tokens: f64,
+    at: std::time::Instant,
+}
+
+impl RebuildBudget {
+    fn new(per_hour: u32) -> Self {
+        RebuildBudget { per_hour: per_hour as f64, tokens: per_hour as f64, at: std::time::Instant::now() }
+    }
+    /// Allow building roots at these heights, or say how long to wait.
+    fn allow(&mut self, ledger: &Ledger, heights: &[u64]) -> std::result::Result<(), String> {
+        let mut new: Vec<u64> = heights.iter().copied().filter(|&h| !ledger.roots_are_cheap(h)).collect();
+        new.sort();
+        new.dedup();
+        if new.is_empty() || self.per_hour <= 0.0 {
+            return Ok(());
+        }
+        let now = std::time::Instant::now();
+        self.tokens = (self.tokens + now.duration_since(self.at).as_secs_f64() * self.per_hour / 3600.0).min(self.per_hour);
+        self.at = now;
+        if self.tokens >= new.len() as f64 {
+            self.tokens -= new.len() as f64;
+            Ok(())
+        } else {
+            let wait = ((new.len() as f64 - self.tokens) * 3600.0 / self.per_hour).ceil();
+            Err(format!("busy: roots at new heights are rebuilt at most {} times an hour; try again in {wait} s", self.per_hour))
+        }
+    }
+}
+
+/// One API request. `budget` is the worker's: only it handles POSTs.
+fn handle(d: &DataDir, reg_id: &str, ledger: &Ledger, budget: Option<&mut RebuildBudget>, method: &str, url: &str, body: &str) -> Result<(u16, serde_json::Value)> {
     let path = url.split('?').next().unwrap_or(url);
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     let tip = ledger.tip();
+    let unit = ledger.unit();
     let mut reg = Registry::load_or_new(d, reg_id)?;
     use serde_json::json;
     Ok(match (method, parts.as_slice()) {
         ("GET", ["api", "state"]) => {
-            let funds: Vec<_> = reg.funds.values().map(|f| fund_view(f, tip, &reg.events)).collect();
+            let funds: Vec<_> = reg.funds.values().map(|f| fund_view(f, tip, &reg.events, unit)).collect();
             let mut events = reg.events.clone();
             events.reverse();
-            (200, json!({ "registry": reg.id, "network": ledger.network, "pool": ledger.pool, "tip": tip,
+            (200, json!({ "registry": reg.id, "network": ledger.network, "pool": ledger.pool, "unit": unit, "tip": tip,
                           "tip_hash": ledger.block(tip)?.hash, "funds": funds, "events": events }))
         }
         ("GET", ["api", "funds", id]) => match reg.funds.get(*id) {
-            Some(f) => (200, serde_json::to_value(fund_view(f, tip, &reg.events))?),
+            Some(f) => (200, serde_json::to_value(fund_view(f, tip, &reg.events, unit))?),
             None => (404, json!({"error": "no such fund"})),
         },
         ("GET", ["api", "funds", id, "attestation"]) => match reg.funds.get(*id).and_then(|f| f.attestations.last()) {
@@ -335,7 +440,15 @@ fn handle(d: &DataDir, reg_id: &str, ledger: &Ledger, method: &str, url: &str, b
             let p = d.public().join(format!("viewing-key-{id}.json"));
             if p.exists() { (200, read_json(&p)?) } else { (200, serde_json::Value::Null) }
         }
-        ("GET", ["api", "roots", h]) => (200, serde_json::to_value(ledger.roots(h.parse()?)?)?),
+        // Only heights already computed here: anyone may ask, so this must stay cheap.
+        ("GET", ["api", "roots", h]) => {
+            let h: u64 = h.parse()?;
+            if ledger.roots_are_cheap(h) {
+                (200, serde_json::to_value(ledger.roots(h)?)?)
+            } else {
+                (404, json!({"error": format!("roots at block {h} are not computed on this registry; rebuild them yourself with `zsolv roots --height {h}`")}))
+            }
+        }
         ("POST", ["api", "funds"]) => {
             let u: ProfileUpdate = serde_json::from_str(body).map_err(|e| anyhow!("bad profile update: {e}"))?;
             let id = reg.register(u)?;
@@ -344,12 +457,33 @@ fn handle(d: &DataDir, reg_id: &str, ledger: &Ledger, method: &str, url: &str, b
         }
         ("POST", ["api", "attest"]) => {
             let a: Attestation = serde_json::from_str(body).map_err(|e| anyhow!("bad attestation: {e}"))?;
+            // Cheap refusals first; then only the fund's own signed rounds can spend the budget.
+            if a.since.height != a.since_height || a.at.height != a.at_height {
+                bail!("heights inconsistent");
+            }
+            let budget = budget.ok_or_else(|| anyhow!("submissions are handled by the worker"))?;
+            if let Some(f) = reg.funds.get(&a.fund_id) {
+                if a.fund_key == f.key && verify_sig(&f.key, &a.message, &a.fund_signature).is_ok() {
+                    if let Err(e) = budget.allow(ledger, &[a.since_height, a.at_height]) {
+                        return Ok((503, json!({"error": e})));
+                    }
+                }
+            }
             let (accepted, reason, verdict) = reg.submit(a, ledger)?;
             reg.save(d)?;
             (if accepted { 200 } else { 422 }, json!({"accepted": accepted, "reason": reason, "verdict": verdict}))
         }
         _ => (404, json!({"error": "not found"})),
     })
+}
+
+/// Run a handler; an error is a 400 and a panic a 500, never a dead server.
+fn guarded(f: impl FnOnce() -> Result<(u16, serde_json::Value)>) -> (u16, serde_json::Value) {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => (400, serde_json::json!({"error": e.to_string()})),
+        Err(_) => (500, serde_json::json!({"error": "internal error"})),
+    }
 }
 
 fn content_type(path: &Path) -> &'static str {
@@ -390,32 +524,36 @@ fn static_file(web: &Path, url_path: &str) -> tiny_http::Response<std::io::Curso
     }
 }
 
-/// Chain data kept in memory (testnet's is ~100 MB), reloaded when the file
-/// changes, e.g. after `zsolv testnet sync` runs beside the server.
+/// Chain data kept in memory (testnet's is ~100 MB), shared by the reader and
+/// the worker, and reloaded when the file changes, e.g. after
+/// `zsolv testnet sync` runs beside the server.
 struct LedgerCache {
     d: DataDir,
     stamp: Option<(PathBuf, u64, std::time::SystemTime)>,
-    ledger: Option<Ledger>,
+    ledger: Option<Arc<Ledger>>,
 }
 
-impl LedgerCache {
-    fn get(&mut self) -> Result<&Ledger> {
-        let p = self.d.ledger();
-        let m = std::fs::metadata(&p).map_err(|_| anyhow!("no chain data at {}", p.display()))?;
-        let stamp = Some((p.clone(), m.len(), m.modified()?));
-        if self.ledger.is_none() || stamp != self.stamp {
-            self.ledger = Some(Ledger::load(&p)?);
-            self.stamp = stamp;
-        }
-        Ok(self.ledger.as_ref().unwrap())
+type SharedChain = Arc<Mutex<LedgerCache>>;
+
+fn chain(c: &SharedChain) -> Result<Arc<Ledger>> {
+    let mut c = c.lock().unwrap_or_else(|e| e.into_inner());
+    let p = c.d.ledger();
+    let m = std::fs::metadata(&p).map_err(|_| anyhow!("no chain data yet in {}: run `zsolv testnet sync` (or `zsolv devnet init`)", c.d.0.join("chain").display()))?;
+    let stamp = Some((p.clone(), m.len(), m.modified()?));
+    if c.ledger.is_none() || stamp != c.stamp {
+        c.ledger = Some(Arc::new(Ledger::load(&p)?));
+        c.stamp = stamp;
     }
+    Ok(c.ledger.clone().unwrap())
 }
 
-/// Per-client token bucket for requests that cost real work: every POST
-/// (each submission or Verify checks two proofs, about a second) and root
-/// rebuilds at arbitrary heights.
+/// Limits for requests that cost real work: every POST (a submission or a
+/// Verify checks two proofs, about a second; a profile update a signature).
 pub struct RateLimit {
+    /// Per client.
     pub per_minute: u32,
+    /// Root rebuilds at new heights per hour, across all clients.
+    pub rebuilds_per_hour: u32,
     /// Take the client from the last X-Forwarded-For entry, the one your own
     /// proxy appended (only behind such a proxy; earlier entries are forgeable).
     pub trust_proxy: bool,
@@ -451,23 +589,52 @@ impl Buckets {
     }
 }
 
-fn costly(method: &str, path: &str) -> bool {
-    method == "POST" || path.starts_with("/api/roots/")
+struct Job {
+    rq: tiny_http::Request,
+    method: String,
+    url: String,
 }
 
+/// POSTs waiting for the worker; beyond this the registry answers "busy".
+const QUEUE: usize = 16;
+
 pub fn serve(d: DataDir, reg_id: String, addr: &str, web: PathBuf, limit: RateLimit) -> Result<()> {
+    Registry::load_or_new(&d, &reg_id)?;
     let server = tiny_http::Server::http(addr).map_err(|e| anyhow!("{e}"))?;
-    eprintln!("Z-Solvency registry {reg_id} on http://{addr} (costly requests: {} per minute per client)", limit.per_minute);
-    let mut chain = LedgerCache { d: d.clone(), stamp: None, ledger: None };
-    let mut buckets = Buckets { per_minute: limit.per_minute as f64, map: Default::default() };
+    eprintln!(
+        "Z-Solvency registry {reg_id} on http://{addr} (POSTs: {} per minute per client; new-height root rebuilds: {} per hour)",
+        limit.per_minute, limit.rebuilds_per_hour
+    );
     if !web.join("index.html").is_file() {
         eprintln!("warning: no web build at {} (npm --prefix web ci && npm --prefix web run build)", web.display());
     }
+    let shared: SharedChain = Arc::new(Mutex::new(LedgerCache { d: d.clone(), stamp: None, ledger: None }));
+    let mut buckets = Buckets { per_minute: limit.per_minute as f64, map: Default::default() };
     // Warm the proving system's verifying key so the first Verify is quick.
     std::thread::spawn(|| {
         let _ = voting_circuits::delegation::warm_delegation_keys();
     });
-    for mut rq in server.incoming_requests() {
+
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Job>(QUEUE);
+    {
+        let (d, reg_id, shared) = (d.clone(), reg_id.clone(), shared.clone());
+        let mut budget = RebuildBudget::new(limit.rebuilds_per_hour);
+        std::thread::spawn(move || {
+            for mut job in rx {
+                let mut body = String::new();
+                let _ = job.rq.as_reader().take(8 << 20).read_to_string(&mut body);
+                let t0 = std::time::Instant::now();
+                let (code, v) = guarded(|| {
+                    let l = chain(&shared)?;
+                    handle(&d, &reg_id, &l, Some(&mut budget), &job.method, &job.url, &body)
+                });
+                eprintln!("{} {} {code} {:?}", job.method, job.url, t0.elapsed());
+                let _ = job.rq.respond(json_resp(code, &v));
+            }
+        });
+    }
+
+    for rq in server.incoming_requests() {
         let method = rq.method().as_str().to_string();
         let url = rq.url().to_string();
         let path = url.split('?').next().unwrap_or("/").to_string();
@@ -480,28 +647,38 @@ pub fn serve(d: DataDir, reg_id: String, addr: &str, web: PathBuf, limit: RateLi
             let _ = rq.respond(resp);
             continue;
         }
-        if costly(&method, &path) {
-            let fwd = limit.trust_proxy.then(|| {
-                rq.headers().iter().find(|h| h.field.equiv("X-Forwarded-For")).map(|h| h.value.as_str().rsplit(',').next().unwrap_or("").trim().to_string())
-            }).flatten();
-            let client = fwd.unwrap_or_else(|| rq.remote_addr().map(|a| a.ip().to_string()).unwrap_or_default());
-            if let Err(wait) = buckets.take(&client) {
-                let resp = json_resp(429, &serde_json::json!({"error": format!("too many requests: try again in {wait} s")}))
-                    .with_header(format!("Retry-After: {wait}").parse::<tiny_http::Header>().unwrap());
-                eprintln!("{method} {url} 429 for {client}");
-                let _ = rq.respond(resp);
-                continue;
+        if method != "POST" {
+            let t0 = std::time::Instant::now();
+            let (code, v) = guarded(|| {
+                let l = chain(&shared)?;
+                handle(&d, &reg_id, &l, None, &method, &url, "")
+            });
+            eprintln!("{method} {url} {code} {:?}", t0.elapsed());
+            let _ = rq.respond(json_resp(code, &v));
+            continue;
+        }
+        let fwd = limit
+            .trust_proxy
+            .then(|| rq.headers().iter().find(|h| h.field.equiv("X-Forwarded-For")).map(|h| h.value.as_str().rsplit(',').next().unwrap_or("").trim().to_string()))
+            .flatten();
+        let client = fwd.unwrap_or_else(|| rq.remote_addr().map(|a| a.ip().to_string()).unwrap_or_default());
+        if let Err(wait) = buckets.take(&client) {
+            let resp = json_resp(429, &serde_json::json!({"error": format!("too many requests: try again in {wait} s")}))
+                .with_header(format!("Retry-After: {wait}").parse::<tiny_http::Header>().unwrap());
+            eprintln!("{method} {url} 429 for {client}");
+            let _ = rq.respond(resp);
+            continue;
+        }
+        match tx.try_send(Job { rq, method, url }) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::TrySendError::Full(job)) | Err(std::sync::mpsc::TrySendError::Disconnected(job)) => {
+                eprintln!("{} {} 503 queue full", job.method, job.url);
+                let _ = job.rq.respond(
+                    json_resp(503, &serde_json::json!({"error": "busy: too many requests in progress; try again shortly"}))
+                        .with_header("Retry-After: 10".parse::<tiny_http::Header>().unwrap()),
+                );
             }
         }
-        let mut body = String::new();
-        let _ = rq.as_reader().take(8 << 20).read_to_string(&mut body);
-        let t0 = std::time::Instant::now();
-        let resp = match chain.get().and_then(|l| handle(&d, &reg_id, l, &method, &url, &body)) {
-            Ok((code, v)) => json_resp(code, &v),
-            Err(e) => json_resp(400, &serde_json::json!({"error": e.to_string()})),
-        };
-        eprintln!("{method} {url} {:?}", t0.elapsed());
-        let _ = rq.respond(resp);
     }
     Ok(())
 }

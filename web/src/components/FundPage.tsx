@@ -32,13 +32,13 @@ function StatusBanner({ fund }: { fund: Fund }) {
       <div>
         <div className="claim">
           {latest
-            ? `Holds at least ${zec(latest.threshold_zat)} ZEC`
+            ? `Holds at least ${zec(latest.threshold_zat)} ${fund.unit}`
             : fund.status === 'red'
               ? 'Reserve proof refused'
               : 'No reserve proof yet'}
           {latest && fund.zec_usd != null && (
             <small>
-              ≈ ${usd(latest.threshold_zat, fund.zec_usd)} at ${fund.zec_usd}/ZEC
+              ≈ ${usd(latest.threshold_zat, fund.zec_usd)} at ${fund.zec_usd}/{fund.unit}
               {fund.price_time ? ` (${fund.price_time})` : ''}
             </small>
           )}
@@ -102,7 +102,7 @@ function Obligations({ fund }: { fund: Fund }) {
         <thead>
           <tr>
             <th>Obligation</th>
-            <th className="num">ZEC</th>
+            <th className="num">{fund.unit}</th>
           </tr>
         </thead>
         <tbody>

@@ -130,6 +130,11 @@ impl Ledger {
         self.network == DEVNET
     }
 
+    /// What amounts are called on this chain: testnet coins are TAZ.
+    pub fn unit(&self) -> &'static str {
+        if self.network == TESTNET { "TAZ" } else { "ZEC" }
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let mut l = if path.extension().is_some_and(|e| e == "bin") {
             Self::load_bin(path)?
@@ -291,7 +296,7 @@ impl Ledger {
                 bail!("expected block {}, got {}", t.height + 1, b.height);
             }
             if prev != t.hash {
-                bail!("block {} does not extend {} (reorg?): run sync again with --rewind", b.height, t.height);
+                bail!("block {} does not extend {} (a reorg during sync): run sync again", b.height, t.height);
             }
         } else if b.height != TESTNET_IRONWOOD_ACTIVATION {
             bail!("testnet chain data must start at Ironwood activation, block {TESTNET_IRONWOOD_ACTIVATION}");
@@ -405,9 +410,24 @@ impl Ledger {
         m
     }
 
+    fn roots_path(&self, h: u64) -> Result<Option<PathBuf>> {
+        let hash = &self.block(h)?.hash;
+        Ok(self.cache.as_ref().map(|d| d.join(format!("{}-{h}-{}.json", self.network, &hash[..16]))))
+    }
+
+    /// Whether roots at `h` are cheap: cached, or devnet-sized. Rebuilding
+    /// at testnet size takes ~10-20 s.
+    pub fn roots_are_cheap(&self, h: u64) -> bool {
+        match self.roots_path(h) {
+            Ok(None) => true,
+            Ok(Some(p)) => p.is_file(),
+            Err(_) => true, // out of range: refused without building anything
+        }
+    }
+
     pub fn roots(&self, h: u64) -> Result<Roots> {
         let hash = self.block(h)?.hash.clone();
-        let cached = self.cache.as_ref().map(|d| d.join(format!("{}-{h}-{}.json", self.network, &hash[..16])));
+        let cached = self.roots_path(h)?;
         if let Some(p) = &cached {
             if let Ok(r) = crate::store::read_json::<Roots>(p) {
                 return Ok(r);

@@ -42,6 +42,11 @@ impl FundKey {
     }
 }
 
+/// Check that `key` is a valid fund public key (hex).
+pub fn check_key(key: &str) -> Result<()> {
+    VerificationKey::<SpendAuth>::try_from(b32(key)?).map(|_| ()).map_err(|_| anyhow!("not a valid fund key: {key}"))
+}
+
 /// Check `sig` over `msg` under the hex public key `key`.
 pub fn verify_sig(key: &str, msg: &str, sig: &str) -> Result<()> {
     let vk = VerificationKey::<SpendAuth>::try_from(b32(key)?).map_err(|_| anyhow!("bad fund key"))?;
