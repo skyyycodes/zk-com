@@ -1,0 +1,5 @@
+# The zakura-* and voting-* crates need Rust 1.97 or later. rustup uses this
+# toolchain for every cargo command inside the repo, whatever your default is.
+# If your stable is older, run `rustup update stable`.
+[toolchain]
+channel = "stable"

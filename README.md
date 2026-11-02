@@ -65,7 +65,7 @@ The light, first match wins: red when the only submission was refused; grey befo
 
 ## Run it
 
-Needs Rust ≥ 1.97 and Node ≥ 22.
+Needs Rust ≥ 1.97 and Node ≥ 22. `rust-toolchain.toml` makes cargo use your stable toolchain inside the repo, whatever your default is; if stable is older than 1.97, run `rustup update stable`.
 
 ```bash
 scripts/demo.sh
