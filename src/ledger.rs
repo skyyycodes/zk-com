@@ -450,3 +450,74 @@ impl Ledger {
         Ok(r)
     }
 }
+
+/// Bring testnet chain data at `path` up to `to` (default: the server's tip
+/// minus `confirmations`), from Ironwood activation or the last synced block.
+/// After a reorg it steps back to where both chains agree and re-fetches.
+pub fn sync_testnet(path: &Path, server: &str, to: Option<u64>, confirmations: u64, rewind: Option<u64>, log: &dyn Fn(&str)) -> Result<Ledger> {
+    use crate::lightwalletd::Lightwalletd;
+    let mut l = if path.exists() { Ledger::load(path)? } else { Ledger::new_testnet() };
+    if let Some(r) = rewind {
+        l.truncate(l.tip().saturating_sub(r).max(l.start_height()))?;
+    }
+    let mut c = Lightwalletd::connect(server)?;
+    let server_tip = c.tip()?;
+    let target = to.unwrap_or(server_tip.saturating_sub(confirmations));
+    if !l.blocks.is_empty() {
+        let (mut h, mut step, mut differs) = (l.tip().min(server_tip), 1u64, false);
+        loop {
+            let mut theirs = None;
+            c.blocks(h, h, |b| {
+                theirs = Some(display_hash(&b.hash));
+                Ok(())
+            })?;
+            if theirs.as_deref() == Some(l.block(h)?.hash.as_str()) {
+                break;
+            }
+            differs = true;
+            if h == l.start_height() {
+                bail!("the local chain data does not match the server's even at block {h}: delete {} and sync again", path.display());
+            }
+            h = h.saturating_sub(step).max(l.start_height());
+            step *= 2;
+        }
+        if differs {
+            log(&format!("reorg: the server's chain differs above block {h}; dropping local blocks {}..={}", h + 1, l.tip()));
+            l.truncate(h)?;
+        }
+    }
+    let mut next = if l.blocks.is_empty() { TESTNET_IRONWOOD_ACTIVATION } else { l.tip() + 1 };
+    let t0 = std::time::Instant::now();
+    let mut unsaved = 0;
+    while next <= target {
+        let end = (next + 9_999).min(target);
+        c.blocks(next, end, |b| l.push_compact(&b))?;
+        if l.tip() != end {
+            bail!("server stopped at block {} of {next}..={end}", l.tip());
+        }
+        log(&format!("block {end} of {target}: {} Ironwood actions ({:.0?})", l.commitment_count(), t0.elapsed()));
+        next = end + 1;
+        unsaved += 1;
+        if unsaved == 5 {
+            l.save(path)?;
+            unsaved = 0;
+        }
+    }
+    l.save(path)?;
+    Ok(l)
+}
+
+/// Compare the Ironwood tree root rebuilt from this chain data at `h` with
+/// the node's own tree state. Errors when they differ.
+pub fn check_root_with_node(l: &Ledger, h: u64, server: &str) -> Result<Roots> {
+    let r = l.roots(h)?;
+    let t = crate::lightwalletd::Lightwalletd::connect(server)?.tree_state(h)?;
+    let (root, size) = crate::tree::frontier_root(&t.ironwood_tree)?;
+    if t.hash != r.block_hash {
+        bail!("block {h} hash differs from the node's: {} vs {}", r.block_hash, t.hash);
+    }
+    if crate::util::fhex(&root) != r.nc_root || size != r.commitments as u64 {
+        bail!("the rebuilt Ironwood root at block {h} does not match the node's");
+    }
+    Ok(r)
+}

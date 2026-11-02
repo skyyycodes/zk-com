@@ -155,6 +155,44 @@ pub fn check_profile(p: &Profile) -> Result<()> {
     Ok(())
 }
 
+/// Chain time at Zcash's 75-second block target.
+pub const HOUR_BLOCKS: u64 = 48;
+pub const DAY_BLOCKS: u64 = 1152;
+pub const WEEK_BLOCKS: u64 = 8064;
+
+/// A stretch of chain time in words: blocks under an hour, then hours, then days.
+pub fn span(blocks: u64) -> String {
+    let p = |n: u64, w: &str| format!("{n} {w}{}", if n == 1 { "" } else { "s" });
+    if blocks < HOUR_BLOCKS {
+        p(blocks, "block")
+    } else if blocks < 2 * DAY_BLOCKS {
+        p(blocks / HOUR_BLOCKS, "hour")
+    } else {
+        p(blocks / DAY_BLOCKS, "day")
+    }
+}
+
+fn cadence_words(c: u64) -> String {
+    match c {
+        WEEK_BLOCKS => "weekly".into(),
+        DAY_BLOCKS => "daily".into(),
+        _ => format!("every {}", span(c)),
+    }
+}
+
+/// The light a round earns on its own (status rules 6 to 8): T against the
+/// obligations, and how long the reserve was held against the promise.
+fn round_light(p: &Profile, a: &Attestation, obligations_zat: u64, unit: &str) -> (&'static str, String) {
+    let held = a.at_height.saturating_sub(a.since_height);
+    if a.threshold_zat < obligations_zat {
+        ("amber", format!("Reserve {} {unit} is below obligations of {} {unit}", zec(a.threshold_zat), zec(obligations_zat)))
+    } else if held < p.min_held_blocks {
+        ("amber", format!("Reserve held {} (since block {}); the fund promises {}", span(held), a.since_height, span(p.min_held_blocks)))
+    } else {
+        ("green", format!("Reserves cover obligations, held since block {}", a.since_height))
+    }
+}
+
 impl Registry {
     pub fn new(id: &str) -> Self {
         Registry { id: id.into(), funds: BTreeMap::new(), nullifier_owner: BTreeMap::new(), events: vec![], allowlist: None }
@@ -295,9 +333,26 @@ pub struct FundView<'a> {
     pub rounds: usize,
     /// Set when this fund's most recent submission was refused.
     pub last_refusal: Option<String>,
+    /// Accepted rounds and refusals, oldest first (the most recent 30).
+    pub past: Vec<PastItem>,
 }
 
-pub fn fund_view<'a>(fund: &'a Fund, tip: u64, events: &[Event], unit: &'static str) -> FundView<'a> {
+#[derive(Serialize, Clone, Debug)]
+pub struct PastItem {
+    /// Unix seconds.
+    pub time: String,
+    pub accepted: bool,
+    pub round: Option<u64>,
+    pub at_height: Option<u64>,
+    pub light: &'static str,
+    pub text: String,
+}
+
+/// A fund's page data. The light follows the design's status rules, first
+/// match wins: refused, nothing yet, no longer verifies, no proof for two
+/// cadences, late, below obligations, held too briefly, green.
+pub fn fund_view<'a>(fund: &'a Fund, ledger: &Ledger, events: &[Event]) -> FundView<'a> {
+    let (tip, unit) = (ledger.tip(), ledger.unit());
     let f = &fund.profile;
     let obligations_zat: u64 = f.obligations.iter().fold(0, |t, o| t.saturating_add(o.zat));
     let latest = fund.attestations.last();
@@ -309,21 +364,43 @@ pub fn fund_view<'a>(fund: &'a Fund, tip: u64, events: &[Event], unit: &'static 
         },
         Some(s) => {
             let a = &s.attestation;
-            let held = a.at_height - a.since_height;
             let age = tip.saturating_sub(a.at_height);
+            let cadence = f.max_proof_age_blocks;
             if !s.verdict.ok {
                 ("red", "Latest proof failed verification".into())
-            } else if f.max_proof_age_blocks > 0 && age > f.max_proof_age_blocks {
-                ("amber", format!("Latest proof is stale: checked {age} blocks ago (block {}); the fund promises a new one every {}", a.at_height, f.max_proof_age_blocks))
-            } else if a.threshold_zat < obligations_zat {
-                ("amber", format!("Reserve {} {unit} is below obligations of {} {unit}", zec(a.threshold_zat), zec(obligations_zat)))
-            } else if held < f.min_held_blocks {
-                ("amber", format!("Reserve only held for {held} block{} (since block {}); the fund promises {}", if held == 1 { "" } else { "s" }, a.since_height, f.min_held_blocks))
+            } else if a.at_height > tip {
+                ("amber", format!("The registry's chain data doesn't reach block {} yet", a.at_height))
+            } else if ledger.block(a.at_height).map(|b| b.hash != a.at_block_hash).unwrap_or(true) {
+                ("red", format!("Latest proof no longer verifies: block {} changed (a chain reorganisation)", a.at_height))
+            } else if cadence > 0 && age > 2 * cadence {
+                let text = if cadence == WEEK_BLOCKS { format!("No proof for {} weeks", age / WEEK_BLOCKS) } else { format!("No proof for {}", span(age)) };
+                ("red", text)
+            } else if cadence > 0 && age > cadence + cadence / 7 {
+                // late by more than a seventh of the cadence: a day, for a weekly fund
+                ("amber", format!("Last proof is {} old; this fund proves {}", span(age), cadence_words(cadence)))
             } else {
-                ("green", format!("Reserves cover obligations, held since block {}", a.since_height))
+                round_light(f, a, obligations_zat, unit)
             }
         }
     };
+    let mut past: Vec<PastItem> = fund
+        .attestations
+        .iter()
+        .map(|s| {
+            let (light, text) = round_light(f, &s.attestation, obligations_zat, unit);
+            PastItem { time: s.received_at.clone(), accepted: true, round: Some(s.attestation.round), at_height: Some(s.attestation.at_height), light, text }
+        })
+        .chain(events.iter().filter(|e| e.fund_id == f.id && !e.accepted).map(|e| PastItem {
+            time: e.time.clone(),
+            accepted: false,
+            round: None,
+            at_height: None,
+            light: "red",
+            text: e.summary.clone(),
+        }))
+        .collect();
+    past.sort_by_key(|p| p.time.parse::<u64>().unwrap_or(0));
+    let past = past.split_off(past.len().saturating_sub(30));
     let latest = latest.map(|s| {
         let a = &s.attestation;
         serde_json::json!({
@@ -359,6 +436,7 @@ pub fn fund_view<'a>(fund: &'a Fund, tip: u64, events: &[Event], unit: &'static 
         latest,
         rounds: fund.attestations.len(),
         last_refusal,
+        past,
     }
 }
 
@@ -414,15 +492,16 @@ fn handle(d: &DataDir, reg_id: &str, ledger: &Ledger, budget: Option<&mut Rebuil
     let mut reg = Registry::load_or_new(d, reg_id)?;
     use serde_json::json;
     Ok(match (method, parts.as_slice()) {
+        ("GET", ["api", "mode"]) => (200, json!({"mode": "registry"})),
         ("GET", ["api", "state"]) => {
-            let funds: Vec<_> = reg.funds.values().map(|f| fund_view(f, tip, &reg.events, unit)).collect();
+            let funds: Vec<_> = reg.funds.values().map(|f| fund_view(f, ledger, &reg.events)).collect();
             let mut events = reg.events.clone();
             events.reverse();
             (200, json!({ "registry": reg.id, "network": ledger.network, "pool": ledger.pool, "unit": unit, "tip": tip,
                           "tip_hash": ledger.block(tip)?.hash, "funds": funds, "events": events }))
         }
         ("GET", ["api", "funds", id]) => match reg.funds.get(*id) {
-            Some(f) => (200, serde_json::to_value(fund_view(f, tip, &reg.events, unit))?),
+            Some(f) => (200, serde_json::to_value(fund_view(f, ledger, &reg.events))?),
             None => (404, json!({"error": "no such fund"})),
         },
         ("GET", ["api", "funds", id, "attestation"]) => match reg.funds.get(*id).and_then(|f| f.attestations.last()) {
@@ -478,7 +557,7 @@ fn handle(d: &DataDir, reg_id: &str, ledger: &Ledger, budget: Option<&mut Rebuil
 }
 
 /// Run a handler; an error is a 400 and a panic a 500, never a dead server.
-fn guarded(f: impl FnOnce() -> Result<(u16, serde_json::Value)>) -> (u16, serde_json::Value) {
+pub(crate) fn guarded(f: impl FnOnce() -> Result<(u16, serde_json::Value)>) -> (u16, serde_json::Value) {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => (400, serde_json::json!({"error": e.to_string()})),
@@ -501,7 +580,7 @@ fn content_type(path: &Path) -> &'static str {
 }
 
 /// Serve the built web app (web/dist). Unknown paths fall back to index.html.
-fn static_file(web: &Path, url_path: &str) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+pub(crate) fn static_file(web: &Path, url_path: &str) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
     let rel = url_path.trim_start_matches('/');
     let safe = !rel.split('/').any(|seg| seg == ".." || seg.contains('\\'));
     let mut path = if rel.is_empty() || !safe { web.join("index.html") } else { web.join(rel) };

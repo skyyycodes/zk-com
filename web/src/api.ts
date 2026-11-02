@@ -1,6 +1,6 @@
 import type { RegistryState, Verdict, ViewingKeyExport } from './types'
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init)
   const body = await res.json().catch(() => null)
   if (!res.ok) {
@@ -13,6 +13,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 const fundPath = (id: string) => `/api/funds/${encodeURIComponent(id)}`
 
 export const api = {
+  mode: () => request<{ mode: 'registry' | 'console' }>('/api/mode'),
   state: () => request<RegistryState>('/api/state'),
   verify: (id: string) => request<Verdict>(`${fundPath(id)}/verify`, { method: 'POST' }),
   viewingKey: async (id: string): Promise<ViewingKeyExport | null> => {

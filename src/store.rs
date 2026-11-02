@@ -51,9 +51,13 @@ impl DataDir {
     pub fn wallet(&self, name: &str) -> PathBuf {
         self.0.join(format!("wallets/{name}.json"))
     }
-    /// A fund's secret signing key (fund side, like its wallet).
-    pub fn fund_key(&self, fund_id: &str) -> PathBuf {
-        self.0.join(format!("funds/{fund_id}.key.json"))
+    /// The fund console's settings (network, registry, wallet, fund).
+    pub fn console(&self) -> PathBuf {
+        self.0.join("console.json")
+    }
+    /// Rounds the console proved but could not publish yet.
+    pub fn pending(&self) -> PathBuf {
+        self.0.join("rounds")
     }
     pub fn registry(&self) -> PathBuf {
         self.0.join("registry/registry.json")

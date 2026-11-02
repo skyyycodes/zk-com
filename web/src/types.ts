@@ -61,6 +61,18 @@ export interface Fund {
   rounds: number
   /** Set when the fund's most recent submission was refused. */
   last_refusal: string | null
+  /** Accepted rounds and refusals, oldest first. */
+  past: PastItem[]
+}
+
+export interface PastItem {
+  /** Unix seconds. */
+  time: string
+  accepted: boolean
+  round: number | null
+  at_height: number | null
+  light: Status
+  text: string
 }
 
 export interface RegistryEvent {

@@ -7,6 +7,7 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use voting_circuits::rand::rngs::OsRng;
+use voting_circuits::rand::Rng;
 use voting_crypto_deps::orchard::{
     keys::{FullViewingKey, PreparedIncomingViewingKey, Scope, SpendingKey},
     note::{ExtractedNoteCommitment, NoteVersion, Nullifier, RandomSeed, Rho},
@@ -65,6 +66,38 @@ impl Wallet {
     pub fn generate(name: &str) -> Self {
         let sk = voting_crypto_deps::random_spending_key(&mut OsRng);
         Wallet { name: name.into(), spending_key: hex::encode(sk.to_bytes()), notes: vec![], history: vec![], birthday: 0 }
+    }
+
+    /// A new wallet from 24 fresh backup words (BIP 39), returned once so the
+    /// user can write them down; `from_mnemonic` restores it.
+    pub fn generate_with_words(name: &str, birthday: u64) -> Result<(Self, String)> {
+        let mut entropy = [0u8; 32];
+        OsRng.fill_bytes(&mut entropy);
+        let words = bip39::Mnemonic::from_entropy(&entropy).map_err(|e| anyhow!("{e}"))?.to_string();
+        Ok((Self::from_mnemonic(name, &words, 0, birthday)?, words))
+    }
+
+    /// The wallet's address as a Unified Address with one Orchard receiver,
+    /// which wallets route into Ironwood after NU6.3. The devnet uses the
+    /// regtest prefix.
+    pub fn unified_address(&self, network: &str) -> Result<String> {
+        use zcash_address::unified::{self, Encoding};
+        use zcash_protocol::consensus::NetworkType;
+        let raw = self.address()?.to_raw_address_bytes();
+        let ua = unified::Address::try_from_items(unified::Revision::R0, vec![unified::Uitem::Data(unified::Receiver::Orchard(raw))])
+            .map_err(|e| anyhow!("{e}"))?;
+        let net = if network == crate::ledger::TESTNET { NetworkType::Test } else { NetworkType::Regtest };
+        Ok(ua.encode(&net))
+    }
+
+    /// The note marked as the reserve, spent or not.
+    pub fn reserve_note(&self) -> Option<&WalletNote> {
+        self.notes.iter().rev().find(|n| n.reserve)
+    }
+
+    /// Unspent value outside the reserve: what payouts may spend.
+    pub fn operating_balance(&self, h: u64) -> u64 {
+        self.unspent_at(h).filter(|n| !n.reserve).map(|n| n.value_zat).sum()
     }
 
     /// The account's Orchard-protocol key from a BIP-39 seed phrase (ZIP 32,

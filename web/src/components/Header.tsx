@@ -3,9 +3,9 @@ import type { RegistryState } from '../types'
 export function Header({ state, error }: { state: RegistryState | null; error: string | null }) {
   return (
     <header className="topbar">
-      <div className="logo">
+      <a className="logo" href="#/">
         Z<span>-</span>Solvency
-      </div>
+      </a>
       <div className="tagline">Show the money, not the people.</div>
       <div className={`chain ${error ? 'offline' : ''}`}>
         {error

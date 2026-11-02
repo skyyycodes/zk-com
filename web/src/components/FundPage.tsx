@@ -1,6 +1,7 @@
-import { blocks, short, usd, zec } from '../format'
+import { blocks, short, span, usd, zec } from '../format'
 import type { Fund, LatestAttestation } from '../types'
 import { ContrastPanel } from './ContrastPanel'
+import { PastRounds } from './PastRounds'
 import { StatusLight } from './StatusLight'
 import { VerifyPanel } from './VerifyPanel'
 
@@ -8,6 +9,9 @@ export function FundPage({ fund }: { fund: Fund }) {
   const latest = fund.latest
   return (
     <>
+      <a className="back" href="#/">
+        ← All funds
+      </a>
       <section className="card">
         <h1>{fund.name}</h1>
         {fund.description && <p className="desc">{fund.description}</p>}
@@ -17,6 +21,7 @@ export function FundPage({ fund }: { fund: Fund }) {
         )}
         {latest && <Facts fund={fund} latest={latest} />}
       </section>
+      <PastRounds fund={fund} />
       <Obligations fund={fund} />
       {latest && <VerifyPanel fundId={fund.id} latest={latest} />}
       <ContrastPanel fund={fund} />
@@ -68,12 +73,12 @@ function Facts({ fund, latest }: { fund: Fund; latest: LatestAttestation }) {
       <Fact
         k="Held since"
         v={`block ${latest.since_height}`}
-        sub={`${blocks(held)} before the check${fund.min_held_blocks ? ` · promised ${fund.min_held_blocks}` : ''}`}
+        sub={`${span(held)} before the check${fund.min_held_blocks ? ` · promised ${span(fund.min_held_blocks)}` : ''}`}
       />
       <Fact
         k="Last checked at"
         v={`block ${latest.at_height}`}
-        sub={`${latest.blocks_behind_tip === 0 ? 'the current tip' : `${blocks(latest.blocks_behind_tip)} behind tip`}${fund.max_proof_age_blocks ? ` · new proof every ${fund.max_proof_age_blocks}` : ''}`}
+        sub={`${latest.blocks_behind_tip === 0 ? 'the current tip' : `${blocks(latest.blocks_behind_tip)} behind tip`}${fund.max_proof_age_blocks ? ` · new proof every ${span(fund.max_proof_age_blocks)}` : ''}`}
       />
       <Fact
         k="Registry nullifier"

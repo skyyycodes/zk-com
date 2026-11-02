@@ -144,14 +144,32 @@ fn only_the_fund_key_publishes_rounds() {
     assert!(ok, "{why}");
     let events = reg.events.len();
 
-    // a proof older than the fund's promised cadence turns amber
-    let mut weekly = profile("mill", "Mill Workers' Strike Fund");
-    weekly.max_proof_age_blocks = 100;
-    reg.register(sign_profile(REG, &weekly, &mill_key, 2).unwrap()).unwrap();
-    assert_eq!(fund_view(&reg.funds["mill"], h + 100, &reg.events, "ZEC").status, "green");
-    let stale = fund_view(&reg.funds["mill"], h + 101, &reg.events, "ZEC");
-    assert_eq!(stale.status, "amber");
-    assert!(stale.status_text.contains("stale"), "{}", stale.status_text);
+    // status rules: late (amber) after a cadence plus a seventh, red after two cadences
+    let mut cadenced = profile("mill", "Mill Workers' Strike Fund");
+    cadenced.max_proof_age_blocks = 100;
+    reg.register(sign_profile(REG, &cadenced, &mill_key, 2).unwrap()).unwrap();
+    let later = |blocks: u64| {
+        let mut l2 = l.clone();
+        for _ in 0..blocks {
+            l2.push_block(vec![], vec![]);
+        }
+        l2
+    };
+    assert_eq!(fund_view(&reg.funds["mill"], &later(114), &reg.events).status, "green");
+    let late = fund_view(&reg.funds["mill"], &later(115), &reg.events);
+    assert_eq!(late.status, "amber");
+    assert!(late.status_text.starts_with("Last proof is 2 hours old; this fund proves every 2 hours"), "{}", late.status_text);
+    let gone = fund_view(&reg.funds["mill"], &later(201), &reg.events);
+    assert_eq!(gone.status, "red");
+    assert!(gone.status_text.starts_with("No proof for 4 hours"), "{}", gone.status_text);
+    // a reorg that replaces block H: the proof no longer verifies
+    let mut other = Ledger::new();
+    while other.tip() < h {
+        other.push_block(vec![], vec![]);
+    }
+    let reorged = fund_view(&reg.funds["mill"], &other, &reg.events);
+    assert_eq!(reorged.status, "red");
+    assert!(reorged.status_text.contains("no longer verifies"), "{}", reorged.status_text);
 
     // impostor with their own 480 ZEC note and their own key: a valid proof, wrong fund
     let hijack = req("other", &impostor_key, 2, None).unwrap();
@@ -200,4 +218,34 @@ fn only_the_fund_key_publishes_rounds() {
     assert!(!ok);
     assert!(why.contains("already counted by Mill Workers' Strike Fund"), "{why}");
     assert!(!reg.events.last().unwrap().accepted);
+
+    // the past-rounds strip: the fund's accepted rounds, and refusals of its own signed rounds
+    let mill = fund_view(&reg.funds["mill"], &l, &reg.events);
+    assert_eq!(mill.past.iter().map(|p| (p.accepted, p.round)).collect::<Vec<_>>(), vec![(true, Some(1)), (true, Some(2))]);
+    let shadow = fund_view(&reg.funds["shadow"], &l, &reg.events);
+    assert_eq!(shadow.past.len(), 1);
+    assert!(!shadow.past[0].accepted && shadow.past[0].light == "red");
+}
+
+#[test]
+fn fund_keys_come_from_the_wallet() {
+    let w = Wallet::generate("mill");
+    let sk = w.sk().unwrap();
+    let pk = |k: FundKey| k.public().unwrap();
+    assert_eq!(pk(FundKey::derive(&sk, "mill")), pk(FundKey::derive(&sk, "mill")));
+    assert_ne!(pk(FundKey::derive(&sk, "mill")), pk(FundKey::derive(&sk, "shadow")));
+    assert_ne!(pk(FundKey::derive(&sk, "mill")), pk(FundKey::derive(&Wallet::generate("other").sk().unwrap(), "mill")));
+    // the backup words restore the wallet, so they restore the fund key
+    let (w2, words) = Wallet::generate_with_words("fund", 0).unwrap();
+    assert_eq!(words.split_whitespace().count(), 24);
+    let restored = Wallet::from_mnemonic("fund", &words, 0, 0).unwrap();
+    assert_eq!(pk(FundKey::derive(&w2.sk().unwrap(), "mill")), pk(FundKey::derive(&restored.sk().unwrap(), "mill")));
+    // the registry binds and accepts it like any fund key
+    let key = FundKey::derive(&sk, "mill");
+    let mut reg = Registry::new(REG);
+    reg.register(sign_profile(REG, &profile("mill", "Mill"), &key, 1).unwrap()).unwrap();
+    assert_eq!(reg.funds["mill"].key, key.public().unwrap());
+    // its address, for receiving into the fund's own wallet
+    assert!(w.unified_address("testnet").unwrap().starts_with("utest1"));
+    assert!(w.unified_address("zsolv-devnet").unwrap().starts_with("uregtest1"));
 }

@@ -11,8 +11,8 @@
 #   MILL_MNEMONIC="..." [QUICK_MNEMONIC="..."] scripts/testnet-demo.sh
 #
 # Seed phrases are read from the environment only, never from arguments, and
-# only until the wallet files exist. Fund keys in $ZSOLV_DATA/funds are never
-# deleted: they are the only way to update those funds on any registry.
+# only until the wallet files exist. Each fund's key is derived from its
+# wallet, so the seed phrase restores it.
 # URL: the registry to publish to (default: a local one this script starts).
 # FRESH=1 resets that local registry first. Rounds continue from the registry.
 set -euo pipefail
@@ -56,10 +56,12 @@ fund() { $Z fund --url "$URL" --registry "$REG" "$@"; }
 next_round() {
   curl -s "$URL/api/funds/$1" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(((d.get("latest") or {}).get("round") or 0) + 1)' 2>/dev/null || echo 1
 }
-fund --id mill --name "Mill Workers' Strike Fund" \
+# Shadow's wallet is a copy of Mill's: someone who got hold of Mill's keys.
+cp "$ZSOLV_DATA/wallets/mill.json" "$ZSOLV_DATA/wallets/shadow.json"
+fund --wallet mill --id mill --name "Mill Workers' Strike Fund" \
   --description "Strike pay for 120 workers at the Halden textile mill. Fictional demo fund, real Ironwood testnet notes." \
   --obligation "Strike pay: 120 workers x 1 TAZ/week x 4 weeks=480" --min-held-blocks 20
-fund --id shadow --name "Shadow Solidarity Fund" \
+fund --wallet shadow --id shadow --name "Shadow Solidarity Fund" \
   --description "Tries to count the Mill Workers' reserve note as its own." --obligation "Grants=480" --min-held-blocks 20
 
 step "Mill Workers prove: at least $T TAZ, held since X=$X, checked at H=$H"
@@ -69,9 +71,9 @@ $Z submit attestations-testnet/mill.json --url "$URL"
 
 if [ -n "${QUICK_MNEMONIC:-}" ]; then
   step "Cheat 1: Quick Relief claims 'held since X' with borrowed coins"
-  fund --id quick --name "Quick Relief Fund" \
-    --description "Claims the same reserve. Its coins arrived just before the check." --obligation "Relief grants=480" --min-held-blocks 20
   [ -f "$ZSOLV_DATA/wallets/quick.json" ] || ZSOLV_MNEMONIC="$QUICK_MNEMONIC" $Z wallet import quick --birthday "$BIRTHDAY"
+  fund --wallet quick --id quick --name "Quick Relief Fund" \
+    --description "Claims the same reserve. Its coins arrived just before the check." --obligation "Relief grants=480" --min-held-blocks 20
   $Z wallet scan quick
   $Z reserve --wallet quick --amount $T
   $Z prove --wallet quick --fund-id quick --registry "$REG" --threshold $T --since "$X" --at "$H" --out attestations-testnet/quick-cheat.json || true
@@ -86,7 +88,6 @@ else
 fi
 
 step "Cheat 2: Shadow fund submits the same note"
-cp "$ZSOLV_DATA/wallets/mill.json" "$ZSOLV_DATA/wallets/shadow.json"
 $Z prove --wallet shadow --fund-id shadow --registry "$REG" --threshold $T --since "$X" --at "$H" --round "$(next_round shadow)" --out attestations-testnet/shadow.json
 $Z submit attestations-testnet/shadow.json --url "$URL" || true
 rm "$ZSOLV_DATA/wallets/shadow.json"

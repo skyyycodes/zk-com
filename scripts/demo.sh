@@ -58,14 +58,17 @@ if ! curl -s "$URL/api/state" >/dev/null 2>&1; then
   ZSOLV_RATE_LIMIT="${ZSOLV_RATE_LIMIT:-0}" $Z serve >/tmp/zsolv-serve.log 2>&1 &
   for i in $(seq 1 50); do curl -s "$URL/api/state" >/dev/null 2>&1 && break; sleep 0.2; done
 fi
-$Z fund --url "$URL" --id mill --name "Mill Workers' Strike Fund" \
+# Each fund signs with a key derived from its wallet. Shadow's wallet is a copy
+# of Mill's: someone who got hold of Mill's keys and starts a second fund.
+cp "$ZSOLV_DATA/wallets/mill.json" "$ZSOLV_DATA/wallets/shadow.json"
+$Z fund --url "$URL" --wallet mill --id mill --name "Mill Workers' Strike Fund" \
   --description "Strike pay for 120 workers at the Halden textile mill. Fictional demo fund." \
   --obligation "Strike pay: 120 workers x 1 ZEC/week x 4 weeks=480" --min-held-blocks 20 \
   --zec-usd 40 --price-time "demo price, 1 Nov 2026"
-$Z fund --url "$URL" --id quick --name "Quick Relief Fund" \
+$Z fund --url "$URL" --wallet quick --id quick --name "Quick Relief Fund" \
   --description "Claims the same reserve. Its coins arrived the block before the check." \
   --obligation "Relief grants=480" --min-held-blocks 20 --zec-usd 40 --price-time "demo price, 1 Nov 2026"
-$Z fund --url "$URL" --id shadow --name "Shadow Solidarity Fund" \
+$Z fund --url "$URL" --wallet shadow --id shadow --name "Shadow Solidarity Fund" \
   --description "Tries to count the Mill Workers' reserve note as its own." \
   --obligation "Grants=480" --min-held-blocks 20
 $Z viewing-key-demo --wallet mill --fund-id mill
@@ -86,8 +89,8 @@ $Z prove --wallet quick --fund-id quick --threshold 480 --at "$H" --round 2 --ou
 $Z submit attestations/quick.json --url "$URL"
 
 step "Cheat 2: Shadow fund submits the same note"
-cp "$ZSOLV_DATA/wallets/mill.json" "$ZSOLV_DATA/wallets/shadow.json"
 $Z prove --wallet shadow --fund-id shadow --threshold 480 --since "$X" --at "$H" --out attestations/shadow.json
 $Z submit attestations/shadow.json --url "$URL" || true
 
 step "Done. Open $URL"
+echo "Treasurer's console for Mill: ./target/release/zsolv console   (choose \"Open a wallet already here\", then mill)"

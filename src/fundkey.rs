@@ -1,13 +1,17 @@
 //! A fund's own signing key. The first registration of a fund id binds its
 //! public key; after that the registry accepts profile changes and rounds
-//! only when this key signs them. Separate from the wallet: the note's
-//! spending key proves control of the coins, this key proves which fund is
-//! speaking.
+//! only when this key signs them. The note's spending key proves control of
+//! the coins; this key proves which fund is speaking.
+//!
+//! It is derived from the wallet's spending key and the fund id, so the
+//! wallet's backup words restore it too. Whoever holds the spending key can
+//! derive it: whoever controls the reserve speaks for the fund.
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use voting_circuits::ff::{Field, PrimeField};
+use voting_circuits::ff::{Field, FromUniformBytes, PrimeField};
 use voting_circuits::rand::rngs::OsRng;
+use voting_crypto_deps::orchard::keys::SpendingKey;
 use voting_crypto_deps::orchard::primitives::redpallas::{Signature, SigningKey, SpendAuth, VerificationKey};
 use voting_crypto_deps::pasta_curves::pallas;
 
@@ -21,8 +25,22 @@ pub struct FundKey {
 }
 
 impl FundKey {
+    /// A random key, for tests and throwaway funds.
     pub fn generate(fund_id: &str) -> Self {
         let s = pallas::Scalar::random(&mut OsRng);
+        FundKey { fund_id: fund_id.into(), signing_key: hex::encode(s.to_repr()) }
+    }
+
+    /// The key for `fund_id`, derived from a wallet's spending key.
+    pub fn derive(sk: &SpendingKey, fund_id: &str) -> Self {
+        let h = blake2b_simd::Params::new()
+            .hash_length(64)
+            .personal(b"ZSolvency_FundK_")
+            .to_state()
+            .update(sk.to_bytes())
+            .update(fund_id.as_bytes())
+            .finalize();
+        let s = pallas::Scalar::from_uniform_bytes(h.as_bytes().try_into().unwrap());
         FundKey { fund_id: fund_id.into(), signing_key: hex::encode(s.to_repr()) }
     }
 

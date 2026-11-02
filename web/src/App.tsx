@@ -1,42 +1,28 @@
-import { FundList } from './components/FundList'
-import { FundPage } from './components/FundPage'
-import { Header } from './components/Header'
-import { RegistryLog } from './components/RegistryLog'
-import { useRegistry, useSelectedFundId } from './hooks'
+import { useEffect, useState } from 'react'
+import { api } from './api'
+import { ConsoleApp } from './console/ConsoleApp'
+import { RegistryApp } from './registry/RegistryApp'
 
+type Mode = 'registry' | 'console'
+
+/** One app, two homes: the public registry (`zsolv serve`) or the treasurer's own console (`zsolv console`). */
 export default function App() {
-  const { state, error } = useRegistry()
-  const routeId = useSelectedFundId()
+  const [mode, setMode] = useState<Mode | null>(null)
 
-  if (!state) {
+  useEffect(() => {
+    // An older registry has no /api/mode; it is still a registry.
+    api.mode().then(
+      (m) => setMode(m.mode),
+      () => setMode('registry'),
+    )
+  }, [])
+
+  if (!mode) {
     return (
-      <>
-        <Header state={null} error={error} />
-        <div className="empty">{error ? `Can't reach the registry: ${error}` : 'Loading registry…'}</div>
-      </>
+      <div className="empty" role="status">
+        Loading…
+      </div>
     )
   }
-
-  const selectedId = routeId ?? state.funds[0]?.id ?? null
-  const fund = state.funds.find((f) => f.id === selectedId) ?? null
-
-  return (
-    <>
-      <Header state={state} error={error} />
-      <div className="layout">
-        <aside>
-          <FundList funds={state.funds} selectedId={selectedId} />
-          <RegistryLog events={state.events} funds={state.funds} />
-        </aside>
-        <main>
-          {fund ? (
-            // key: a different fund starts with a fresh verify panel
-            <FundPage key={fund.id} fund={fund} />
-          ) : (
-            <div className="empty">{state.funds.length ? 'No such fund in this registry.' : 'No funds registered yet.'}</div>
-          )}
-        </main>
-      </div>
-    </>
-  )
+  return mode === 'console' ? <ConsoleApp /> : <RegistryApp />
 }

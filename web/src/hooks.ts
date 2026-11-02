@@ -25,16 +25,19 @@ export function useRegistry(intervalMs = 5000) {
   return { state, error }
 }
 
-/** `#/fund/<id>` selects a fund; anything else falls back to the first one. */
-export function useSelectedFundId(): string | null {
+/** The route after `#`, e.g. `/fund/mill`; `/` when there is none. */
+export function useRoute(): string {
   const [hash, setHash] = useState(() => window.location.hash)
   useEffect(() => {
-    const onChange = () => setHash(window.location.hash)
+    const onChange = () => {
+      setHash(window.location.hash)
+      window.scrollTo(0, 0)
+    }
     window.addEventListener('hashchange', onChange)
     return () => window.removeEventListener('hashchange', onChange)
   }, [])
-  const match = hash.match(/^#\/?fund\/(.+)$/)
-  return match ? decodeURIComponent(match[1]) : null
+  const route = hash.replace(/^#/, '')
+  return route.startsWith('/') ? route : '/'
 }
 
 export const fundHref = (id: string) => `#/fund/${encodeURIComponent(id)}`

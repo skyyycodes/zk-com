@@ -102,9 +102,6 @@ enum Cmd {
         round: u64,
         #[arg(long, default_value = DEFAULT_REGISTRY, env = "ZSOLV_REGISTRY")]
         registry: String,
-        /// The fund's signing key (default: <data>/funds/<fund-id>.key.json).
-        #[arg(long)]
-        fund_key: Option<PathBuf>,
         #[arg(long)]
         out: Option<PathBuf>,
         /// Demo of a cheat: label the attestation as held since this block.
@@ -116,10 +113,13 @@ enum Cmd {
         file: PathBuf,
     },
     /// Register or update a fund's public profile (direct on the registry state, or --url).
-    /// Creates the fund's signing key on first use; every later change and round needs it.
+    /// Signed with the fund key derived from the wallet; every later change and round needs it.
     Fund {
         #[arg(long)]
         id: String,
+        /// The fund's wallet: its spending key derives the fund key.
+        #[arg(long)]
+        wallet: String,
         #[arg(long)]
         name: String,
         #[arg(long, default_value = "")]
@@ -140,9 +140,18 @@ enum Cmd {
         url: Option<String>,
         #[arg(long, default_value = DEFAULT_REGISTRY, env = "ZSOLV_REGISTRY")]
         registry: String,
-        /// The fund's signing key (default: <data>/funds/<id>.key.json).
+    },
+    /// The fund console: a local web app for the treasurer (setup, register,
+    /// lock the reserve, prove and publish). Keys never leave this machine.
+    Console {
+        #[arg(long, default_value = "127.0.0.1:7070")]
+        addr: String,
+        /// The built web app to serve.
+        #[arg(long, default_value = "web/dist")]
+        web: PathBuf,
+        /// Don't open a browser.
         #[arg(long)]
-        fund_key: Option<PathBuf>,
+        no_open: bool,
     },
     /// Submit an attestation to a registry server.
     Submit {
@@ -256,11 +265,6 @@ fn load_wallet(d: &DataDir, name: &str) -> Result<Wallet> {
     read_json(&d.wallet(name)).map_err(|_| anyhow!("no wallet named {name} (create it with `zsolv wallet new {name}`)"))
 }
 
-fn load_fund_key(d: &DataDir, fund_id: &str, path: Option<PathBuf>) -> Result<FundKey> {
-    let p = path.unwrap_or_else(|| d.fund_key(fund_id));
-    read_json(&p).map_err(|_| anyhow!("no fund key at {} (register the fund with `zsolv fund --id {fund_id}` first)", p.display()))
-}
-
 fn main() {
     if let Err(e) = run() {
         eprintln!("error: {e:#}");
@@ -320,55 +324,7 @@ fn run() -> Result<()> {
             }
             TestnetCmd::Sync { server, to, confirmations, rewind } => {
                 let path = d.testnet_ledger();
-                let mut l = if path.exists() { Ledger::load(&path)? } else { Ledger::new_testnet() };
-                if let Some(r) = rewind {
-                    l.truncate(l.tip().saturating_sub(r).max(l.start_height()))?;
-                }
-                let mut c = zsolv::lightwalletd::Lightwalletd::connect(&server)?;
-                let server_tip = c.tip()?;
-                let target = to.unwrap_or(server_tip.saturating_sub(confirmations));
-                if !l.blocks.is_empty() {
-                    // After a reorg: step back until our block matches the server's, then drop the rest.
-                    let (mut h, mut step, mut differs) = (l.tip().min(server_tip), 1u64, false);
-                    loop {
-                        let mut theirs = None;
-                        c.blocks(h, h, |b| {
-                            theirs = Some(zsolv::lightwalletd::display_hash(&b.hash));
-                            Ok(())
-                        })?;
-                        if theirs.as_deref() == Some(l.block(h)?.hash.as_str()) {
-                            break;
-                        }
-                        differs = true;
-                        if h == l.start_height() {
-                            bail!("the local chain data does not match the server's even at block {h}: delete {} and sync again", path.display());
-                        }
-                        h = h.saturating_sub(step).max(l.start_height());
-                        step *= 2;
-                    }
-                    if differs {
-                        eprintln!("reorg: the server's chain differs above block {h}; dropping local blocks {}..={}", h + 1, l.tip());
-                        l.truncate(h)?;
-                    }
-                }
-                let mut next = if l.blocks.is_empty() { zsolv::ledger::TESTNET_IRONWOOD_ACTIVATION } else { l.tip() + 1 };
-                let t0 = std::time::Instant::now();
-                let mut unsaved = 0;
-                while next <= target {
-                    let end = (next + 9_999).min(target);
-                    c.blocks(next, end, |b| l.push_compact(&b))?;
-                    if l.tip() != end {
-                        bail!("server stopped at block {} of {next}..={end}", l.tip());
-                    }
-                    eprintln!("block {end} of {target}: {} Ironwood actions ({:.0?})", l.commitment_count(), t0.elapsed());
-                    next = end + 1;
-                    unsaved += 1;
-                    if unsaved == 5 {
-                        l.save(&path)?;
-                        unsaved = 0;
-                    }
-                }
-                l.save(&path)?;
+                let l = zsolv::ledger::sync_testnet(&path, &server, to, confirmations, rewind, &|m| eprintln!("{m}"))?;
                 println!("testnet chain data: blocks {}..={}, {} Ironwood actions, at {}", l.start_height(), l.tip(), l.commitment_count(), path.display());
             }
         },
@@ -420,7 +376,9 @@ fn run() -> Result<()> {
             }
             WalletCmd::Show { name } => {
                 let l = Ledger::load(&d.ledger())?;
-                print!("{}", load_wallet(&d, &name)?.summary(l.tip()));
+                let w = load_wallet(&d, &name)?;
+                print!("{}", w.summary(l.tip()));
+                println!("  address: {}", w.unified_address(&l.network)?);
             }
         },
         Cmd::Send { to, amount, from, label, memo, reserve } => {
@@ -470,23 +428,14 @@ fn run() -> Result<()> {
                 if l.is_devnet() {
                     bail!("--check compares with a testnet node; this is devnet chain data");
                 }
-                let t = zsolv::lightwalletd::Lightwalletd::connect(&server)?.tree_state(r.height)?;
-                let (root, size) = zsolv::tree::frontier_root(&t.ironwood_tree)?;
-                let root = zsolv::util::fhex(&root);
-                println!("node at {}: block {}, Ironwood tree root {root}, {size} commitments", server, t.hash);
-                if t.hash != r.block_hash {
-                    bail!("block {} hash differs from the node's: {} vs {}", r.height, r.block_hash, t.hash);
-                }
-                if root != r.nc_root || size != r.commitments as u64 {
-                    bail!("rebuilt Ironwood root does NOT match the node's");
-                }
+                zsolv::ledger::check_root_with_node(&l, r.height, &server)?;
                 println!("MATCH: the rebuilt Ironwood tree root equals the node's at block {}", r.height);
             }
         }
-        Cmd::Prove { wallet, fund_id, threshold, since, at, round, registry, fund_key, out, cheat_claim_since } => {
+        Cmd::Prove { wallet, fund_id, threshold, since, at, round, registry, out, cheat_claim_since } => {
             let l = Ledger::load(&d.ledger())?;
             let w = load_wallet(&d, &wallet)?;
-            let fk = load_fund_key(&d, &fund_id, fund_key)?;
+            let fk = FundKey::derive(&w.sk()?, &fund_id);
             let log = |s: &str| eprintln!("{s}");
             let a = prove(ProveRequest {
                 wallet: &w,
@@ -523,7 +472,7 @@ fn run() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Cmd::Fund { id, name, description, obligations, min_held_blocks, max_proof_age_blocks, zec_usd, price_time, url, registry, fund_key } => {
+        Cmd::Fund { id, wallet, name, description, obligations, min_held_blocks, max_proof_age_blocks, zec_usd, price_time, url, registry } => {
             let obligations = obligations
                 .iter()
                 .map(|o| {
@@ -531,15 +480,9 @@ fn run() -> Result<()> {
                     Ok(Obligation { label: label.trim().into(), zat: parse_zec(z)? })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let key_path = fund_key.unwrap_or_else(|| d.fund_key(&id));
-            let fk = if key_path.exists() {
-                load_fund_key(&d, &id, Some(key_path))?
-            } else {
-                let k = FundKey::generate(&id);
-                write_secret_json(&key_path, &k)?;
-                eprintln!("created fund key {} at {} (secret: keep it with the wallet)", k.public()?, key_path.display());
-                k
-            };
+            let w = load_wallet(&d, &wallet)?;
+            let fk = FundKey::derive(&w.sk()?, &id);
+            eprintln!("fund key {} (derived from wallet {wallet})", fk.public()?);
             let p = Profile { id: id.clone(), name, description, obligations, min_held_blocks, max_proof_age_blocks, zec_usd, price_time };
             // Milliseconds since the epoch: increases across updates without local state.
             let seq = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
@@ -576,6 +519,7 @@ fn run() -> Result<()> {
             }
             println!("{} {}", if code == 200 { "ACCEPTED:" } else { "REFUSED:" }, v["reason"].as_str().unwrap_or(""));
         }
+        Cmd::Console { addr, web, no_open } => zsolv::console::serve(d, &addr, web, !no_open)?,
         Cmd::Serve { addr, registry, web, rate_limit, rebuilds_per_hour, trust_proxy } => {
             zsolv::registry::serve(d, registry, &addr, web, zsolv::registry::RateLimit { per_minute: rate_limit, rebuilds_per_hour, trust_proxy })?
         }

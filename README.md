@@ -24,7 +24,7 @@ A published viewing key would prove the balance, but it is permanent, exact, and
 |---|---|---|
 | At least T ZEC | The delegation circuit commits to the notes' total value in 0.125 ZEC steps (`van_comm`), and the fund opens that commitment. Over-claiming is impossible in-circuit. | Revealing the real balance |
 | Controlled by the fund | A RedPallas spend-auth signature under each proof's `rk` over the round message (fund, round, block H's hash, T, registry nullifiers). | Proving with someone else's viewing key; replaying an old proof |
-| Published by that fund | Registering a fund id binds the fund's own key. That key signs every profile change (with a rising sequence number) and every round message, and the registry refuses anything else without touching the fund's page. | Editing another fund's name or obligations; publishing a round under another fund with your own coins |
+| Published by that fund | Registering a fund id binds the fund's own key, derived from its wallet, so the wallet's backup words restore it. That key signs every profile change (with a rising sequence number) and every round message, and the registry refuses anything else without touching the fund's page. | Editing another fund's name or obligations; publishing a round under another fund with your own coins |
 | One note, one fund | Each note shows an alternate nullifier scoped to the registry (`vote_round_id` = registry id), not its real nullifier. The registry refuses one that another fund already counted. | Two funds counting the same coins |
 | Held since block X | Two proofs, at X and at H, over the same notes: all five registry nullifiers must match. A spent note can't come back. | Borrowing coins for audit day |
 
@@ -42,7 +42,7 @@ Anyone sees T, heights X and H, the registry nullifiers, the message and the pro
 flowchart LR
   subgraph Fund ["Fund (secret, never leaves)"]
     W[Wallet: spending key + reserve note]
-    P[zsolv prove]
+    P[Fund console: zsolv console, or zsolv prove]
   end
   C[(Public chain data)] --> R[zsolv roots: Ironwood tree root + nullifier IMT root at X and H]
   W --> P
@@ -58,7 +58,10 @@ flowchart LR
 - **Prover** (`src/attest.rs`): for heights X and H it rebuilds the Ironwood note commitment tree (`src/tree.rs`) and the nullifier IMT (`src/imt.rs`), builds a Valar delegation proof over the reserve notes, reusing the same padding notes in both, and signs the round message with each proof's randomized key.
 - **Verifier** (`zsolv verify`, and the registry): rebuilds both roots from chain data and never trusts copies in the attestation. It checks both proofs, the value opening against T, both signatures, the block hash at H, that all five registry nullifiers match between X and H, and that they are distinct within each proof.
 - **Registry** (`src/registry.rs`): binds each fund id to the key that registered it, accepts profile changes and rounds only under that key, verifies each submission, refuses a registry nullifier already owned by another fund, refuses a round that isn't newer, and serves the JSON API plus the web app.
-- **Web** (`web/`): React + TypeScript (Vite). Shows the status light, held-since, last check, obligations, a live Verify button, and the viewing-key contrast panel.
+- **Fund console** (`src/console.rs`): `zsolv console` serves the treasurer's app on 127.0.0.1: set up the wallet (24 backup words), register the fund, lock the reserve, prove and publish with each step and its timing, and the history of rounds. It holds the keys; its API answers only its own page (a per-run token in the link, plus Host and Origin checks). A round the registry can't take is saved and retried.
+- **Web** (`web/`): React + TypeScript (Vite). One app: on the registry, the home page (every fund with its light, and search), each fund's page (status, facts, past rounds, obligations, a live Verify button, the viewing-key contrast) and "List your fund"; served by `zsolv console`, the fund console.
+
+The light, first match wins: red when the only submission was refused; grey before any proof; red when the latest proof no longer verifies (block H changed in a reorg); red after two missed cadences; amber when the proof is late by more than a seventh of the cadence (a day, for a weekly fund); amber when T is below the obligations; amber until the reserve has been held for the promised time; otherwise green.
 
 ## Run it
 
@@ -74,6 +77,8 @@ That builds everything, creates a local Ironwood devnet, and plays out the demo:
 - **Shadow Solidarity Fund** submits the same note and is refused.
 
 Then open http://127.0.0.1:8080.
+
+The treasurer's side: `./target/release/zsolv console` opens the fund console. Choose "Open a wallet already here", then `mill`, and press Prove and publish to publish Mill's next round.
 
 Tests (the Tuesday gate plus the cheats, registry rules, the testnet path and malformed input, with real proofs, about 10 s):
 
@@ -119,7 +124,7 @@ DOMAIN=reserves.example.org docker compose up -d --build
 
 The first sync takes about 6 minutes; until then the API answers "no chain data".
 
-By default anyone may register an unused fund id, and every fund is listed on the page. For a public page, close registration to your own funds (`zsolv fund` prints a fund's public key when it creates it):
+By default anyone may register an unused fund id, and every fund is listed on the page. For a public page, close registration to your own funds (`zsolv fund` and the console print each fund's public key):
 
 ```bash
 docker compose exec registry zsolv registry allow --id mill --key <public key>
@@ -139,10 +144,11 @@ zsolv wallet new <name> | show <name> | import <name> [--account N] [--birthday 
 zsolv send --to <wallet> --amount <ZEC> [--from <wallet>] [--label ...] [--memo ...] [--reserve]
 zsolv reserve --wallet <w> --amount <ZEC> [--cmx prefix]  # devnet: make it; testnet: mark it
 zsolv roots [--height N] [--check]                # rebuild roots; --check against the node
-zsolv prove --wallet <w> --fund-id <id> --threshold <ZEC> [--since X] [--at H] [--round N] [--fund-key file] [--out file]
+zsolv prove --wallet <w> --fund-id <id> --threshold <ZEC> [--since X] [--at H] [--round N] [--out file]
 zsolv verify <attestation.json>
-zsolv fund --id <id> --name <name> --obligation "label=ZEC" [--min-held-blocks N] [--max-proof-age-blocks N] [--url URL] [--fund-key file]
-                                                  # first run creates <data>/funds/<id>.key.json (secret)
+zsolv fund --wallet <w> --id <id> --name <name> --obligation "label=ZEC" [--min-held-blocks N] [--max-proof-age-blocks N] [--url URL]
+                                                  # signed with the fund key derived from the wallet
+zsolv console [--addr 127.0.0.1:7070] [--no-open]  # the fund console, on this machine only
 zsolv submit <attestation.json> [--url URL]
 zsolv serve [--addr 127.0.0.1:8080] [--web web/dist] [--rate-limit N] [--rebuilds-per-hour N] [--trust-proxy]
 zsolv registry allow --id <id> --key <public key> | open   # close registration to listed funds, or reopen it
@@ -152,7 +158,8 @@ zsolv registry allow --id <id> --key <public key> | open   # close registration 
 
 | Method | Path | |
 |---|---|---|
-| GET | `/api/state` | Registry, chain tip, funds with status, event log |
+| GET | `/api/mode` | `registry` here; `console` from `zsolv console` |
+| GET | `/api/state` | Registry, chain tip, funds with status and past rounds, event log |
 | GET | `/api/funds/:id` | One fund's page data |
 | GET | `/api/funds/:id/attestation` | Latest attestation (raw, for `zsolv verify`) |
 | POST | `/api/funds/:id/verify` | Re-verify the latest attestation now |
@@ -183,7 +190,9 @@ Pre-hack work (allowed by WebZero): this repository as of 1 Nov 2026. Work done 
 - At most 5 reserve notes per proof (one reserve note of exactly T is the intended use).
 - The registry nullifier links one fund's own rounds, by design. T, the heights and the timing are public.
 - By default X is the block where the reserve note was created. On a quiet chain that block points at the fund's own transaction. Pass a later `--since` to avoid that.
-- Fund ids are first come, first served unless the operator closes registration: whoever registers an id first binds its key. There is no key rotation or recovery yet; a lost fund key means registering a new id.
+- Fund ids are first come, first served unless the operator closes registration: whoever registers an id first binds its key.
+- The fund key is derived from the wallet's spending key: the backup words restore it, and anyone holding the spending key can speak for the fund. There is no key rotation yet; a fund that moves to a new wallet registers a new id.
+- On testnet the console doesn't send transactions: the fund's everyday wallet sends the reserve note to itself, and the console finds it.
 - The registry is a single process with a JSON file. The Verify button runs on the registry; independent checks use `zsolv verify`.
 
 ## Roadmap
