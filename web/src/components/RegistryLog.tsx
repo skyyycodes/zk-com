@@ -4,7 +4,7 @@ export function RegistryLog({ events, funds }: { events: RegistryEvent[]; funds:
   const name = (id: string) => funds.find((f) => f.id === id)?.name ?? id
   return (
     <section className="log" aria-label="Registry log">
-      <h3 className="eyebrow">Registry log</h3>
+      <h2 className="eyebrow">Registry log</h2>
       {events.length === 0 && <p className="muted">Nothing yet.</p>}
       {events.slice(0, 12).map((e, i) => (
         <div className="event" key={`${e.time}-${i}`}>

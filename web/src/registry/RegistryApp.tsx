@@ -1,29 +1,31 @@
 import { FundPage } from '../components/FundPage'
-import { Header } from '../components/Header'
 import { Home } from '../components/Home'
-import { Landing } from '../components/Landing'
 import { ListFund } from '../components/ListFund'
 import { useRegistry, useRoute } from '../hooks'
+import { Landing } from '../landing/Landing'
+import { SiteNav } from '../landing/SiteNav'
 
 export function RegistryApp() {
   const { state, error } = useRegistry()
   const route = useRoute()
-  const fundId = route.match(/^\/fund\/(.+)$/)?.[1]
+  // "/?to=how" is the landing page, scrolled to a section.
+  const [path, query = ''] = route.split('?')
+  const fundId = path.match(/^\/fund\/(.+)$/)?.[1]
 
   // The landing page explains the idea on its own, so it renders before the registry answers.
-  if (route === '/') {
+  if (path === '/') {
     return (
       <>
-        <Header state={state} error={error} route={route} />
+        <SiteNav state={state} error={error} route={route} />
         <main>
-          <Landing state={state} />
+          <Landing state={state} to={new URLSearchParams(query).get('to')} />
         </main>
       </>
     )
   }
 
   let body
-  if (route === '/list') {
+  if (path === '/list') {
     body = <ListFund />
   } else if (!state) {
     body = (
@@ -47,8 +49,8 @@ export function RegistryApp() {
 
   return (
     <>
-      <Header state={state} error={error} route={route} />
-      <main className="page">{body}</main>
+      <SiteNav state={state} error={error} route={route} />
+      <main className="page under-nav">{body}</main>
     </>
   )
 }
