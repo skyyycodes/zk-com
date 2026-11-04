@@ -57,9 +57,9 @@ flowchart LR
 
 - **Prover** (`src/attest.rs`): for heights X and H it rebuilds the Ironwood note commitment tree (`src/tree.rs`) and the nullifier IMT (`src/imt.rs`), builds a Valar delegation proof over the reserve notes, reusing the same padding notes in both, and signs the round message with each proof's randomized key.
 - **Verifier** (`zsolv verify`, and the registry): rebuilds both roots from chain data and never trusts copies in the attestation. It checks both proofs, the value opening against T, both signatures, the block hash at H, that all five registry nullifiers match between X and H, and that they are distinct within each proof.
-- **Registry** (`src/registry.rs`): binds each fund id to the key that registered it, accepts profile changes and rounds only under that key, verifies each submission, refuses a registry nullifier already owned by another fund, refuses a round that isn't newer, and serves the JSON API plus the web app.
+- **Registry** (`src/registry.rs`): binds each fund id to the key that registered it, accepts profile changes and rounds only under that key, verifies each submission, refuses a registry nullifier already owned by another fund, refuses a round that isn't newer, and serves the JSON API plus the web app. Funds are unlisted: nothing enumerates them. Each fund gets a random 128-bit link token at first registration, returned only to whoever signs as the fund, and its page, attestation and Verify are reachable only through that link. A refusal for a reused note says "another fund", not which one.
 - **Fund console** (`src/console.rs`): `zsolv console` serves the treasurer's app on 127.0.0.1: set up the wallet (24 backup words), register the fund, lock the reserve, prove and publish with each step and its timing, and the history of rounds. It holds the keys; its API answers only its own page (a per-run token in the link, plus Host and Origin checks). A round the registry can't take is saved and retried.
-- **Web** (`web/`): React + TypeScript (Vite). One app: on the registry, the home page (every fund with its light, and search), each fund's page (status, facts, past rounds, obligations, a live Verify button, the viewing-key contrast) and "List your fund"; served by `zsolv console`, the fund console.
+- **Web** (`web/`): React + TypeScript (Vite). One app: on the registry, the landing page, "Create your link" (how to run the console), "Verify a link" (paste one), and the fund behind a link (status, facts, past rounds, obligations, a live Verify button, the viewing-key contrast); served by `zsolv console`, the fund console, which ends each round on the fund's share link.
 
 The light, first match wins: red when the only submission was refused; grey before any proof; red when the latest proof no longer verifies (block H changed in a reorg); red after two missed cadences; amber when the proof is late by more than a seventh of the cadence (a day, for a weekly fund); amber when T is below the obligations; amber until the reserve has been held for the promised time; otherwise green.
 
@@ -76,7 +76,7 @@ That builds everything, creates a local Ironwood devnet, and plays out the demo:
 - **Quick Relief Fund** borrows 480 ZEC the block before the check. It can't prove "held since X", and relabelling the height fails verification. Its honest proof says "held since H−1", so it shows amber.
 - **Shadow Solidarity Fund** submits the same note and is refused.
 
-Then open http://127.0.0.1:8080.
+Then open http://127.0.0.1:8080. Funds aren't listed: the script prints each fund's share link at the end.
 
 The treasurer's side: `./target/release/zsolv console` opens the fund console. Choose "Open a wallet already here", then `mill`, and press Prove and publish to publish Mill's next round.
 
@@ -124,7 +124,7 @@ DOMAIN=reserves.example.org docker compose up -d --build
 
 The first sync takes about 6 minutes; until then the API answers "no chain data".
 
-By default anyone may register an unused fund id, and every fund is listed on the page. For a public page, close registration to your own funds (`zsolv fund` and the console print each fund's public key):
+By default anyone may register an unused fund id. Funds aren't listed, but anyone can still create one. To accept only your own funds, close registration (`zsolv fund` and the console print each fund's public key):
 
 ```bash
 docker compose exec registry zsolv registry allow --id mill --key <public key>
@@ -159,11 +159,11 @@ zsolv registry allow --id <id> --key <public key> | open   # close registration 
 | Method | Path | |
 |---|---|---|
 | GET | `/api/mode` | `registry` here; `console` from `zsolv console` |
-| GET | `/api/state` | Registry, chain tip, funds with status and past rounds, event log |
-| GET | `/api/funds/:id` | One fund's page data |
-| GET | `/api/funds/:id/attestation` | Latest attestation (raw, for `zsolv verify`) |
-| POST | `/api/funds/:id/verify` | Re-verify the latest attestation now |
-| POST | `/api/funds` | Register or update a fund profile, signed by the fund key |
+| GET | `/api/state` | Registry id, network, chain tip. No funds: they are unlisted |
+| GET | `/api/links/:link` | The fund behind a share link: status and past rounds |
+| GET | `/api/links/:link/attestation` | Latest attestation (raw, for `zsolv verify`) |
+| POST | `/api/links/:link/verify` | Re-verify the latest attestation now |
+| POST | `/api/funds` | Register or update a fund profile, signed by the fund key; returns the fund's `link` |
 | POST | `/api/attest` | Submit an attestation, signed by the fund key |
 | GET | `/api/roots/:height` | Tree and nullifier-IMT roots at a height this registry has computed |
 

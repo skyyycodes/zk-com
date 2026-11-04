@@ -4,7 +4,7 @@ import type { LatestAttestation, Verdict } from '../types'
 
 const STAGGER_MS = 120
 
-export function VerifyPanel({ fundId, latest }: { fundId: string; latest: LatestAttestation }) {
+export function VerifyPanel({ link, fileName, latest }: { link: string; fileName: string; latest: LatestAttestation }) {
   const [verdict, setVerdict] = useState<Verdict | null>(null)
   const [shown, setShown] = useState(0)
   const [running, setRunning] = useState(false)
@@ -23,7 +23,7 @@ export function VerifyPanel({ fundId, latest }: { fundId: string; latest: Latest
     setVerdict(null)
     setShown(0)
     try {
-      setVerdict(await api.verify(fundId))
+      setVerdict(await api.verify(link))
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -66,15 +66,15 @@ export function VerifyPanel({ fundId, latest }: { fundId: string; latest: Latest
       )}
       <p className="muted spaced">
         Or on your own machine (
-        <a href={api.attestationUrl(fundId)} download={`${fundId}.json`}>
+        <a href={api.attestationUrl(link)} download={`${fileName}.json`}>
           download the attestation
         </a>
         ):
       </p>
       <pre>
-        {`curl -s ${origin}${api.attestationUrl(fundId)} > ${fundId}.json\n`}
+        {`curl -s ${origin}${api.attestationUrl(link)} > ${fileName}.json\n`}
         {`zsolv roots --height ${latest.at_height}\n`}
-        {`zsolv verify ${fundId}.json`}
+        {`zsolv verify ${fileName}.json`}
       </pre>
     </section>
   )

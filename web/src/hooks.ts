@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from './api'
-import type { RegistryState } from './types'
+import type { Fund, RegistryState } from './types'
 
-/** Polls the registry so new attestations and refusals show up live. */
-export function useRegistry(intervalMs = 5000) {
+/** Polls the registry's chain facts (tip, network). */
+export function useRegistry(intervalMs = 10000) {
   const [state, setState] = useState<RegistryState | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -25,7 +25,41 @@ export function useRegistry(intervalMs = 5000) {
   return { state, error }
 }
 
-/** The route after `#`, e.g. `/fund/mill`; `/` when there is none. */
+/** Polls one fund through its share link, so a new round shows up live. */
+export function useFund(link: string, intervalMs = 5000) {
+  const [fund, setFund] = useState<Fund | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [missing, setMissing] = useState(false)
+
+  useEffect(() => {
+    let live = true
+    const load = async () => {
+      try {
+        const f = await api.fund(link)
+        if (live) {
+          setFund(f)
+          setError(null)
+        }
+      } catch (e) {
+        const m = e instanceof Error ? e.message : String(e)
+        if (live) {
+          if (m.includes('no fund at this link')) setMissing(true)
+          else setError(m)
+        }
+      }
+    }
+    void load()
+    const timer = setInterval(() => void load(), intervalMs)
+    return () => {
+      live = false
+      clearInterval(timer)
+    }
+  }, [link, intervalMs])
+
+  return { fund, error, missing }
+}
+
+/** The route after `#`, e.g. `/v/<token>`; `/` when there is none. */
 export function useRoute(): string {
   const [hash, setHash] = useState(() => window.location.hash)
   useEffect(() => {
@@ -40,4 +74,4 @@ export function useRoute(): string {
   return route.startsWith('/') ? route : '/'
 }
 
-export const fundHref = (id: string) => `#/fund/${encodeURIComponent(id)}`
+export const linkHref = (link: string) => `#/v/${link}`

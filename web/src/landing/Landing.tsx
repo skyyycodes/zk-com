@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { zec } from '../format'
-import { fundHref } from '../hooks'
+import { linkToken } from '../api'
+import { linkHref } from '../hooks'
 import type { RegistryState } from '../types'
-import { StatusDot } from '../components/StatusLight'
 import { AsciiCanvas, Icon, Label, prefersReducedMotion, useInView } from './kit'
 import { jump } from './SiteNav'
 
@@ -19,10 +18,9 @@ export function Landing({ state, to }: { state: RegistryState | null; to: string
       <Hero />
       <Proof />
       <How />
-      <Live state={state} />
       <Privacy />
       <Cases />
-      <Funds state={state} />
+      <HaveLink />
       <Cta />
       <Footer state={state} />
     </div>
@@ -92,11 +90,11 @@ function Hero() {
             got.
           </p>
           <div className="hero-ctas rise d3">
-            <a className="btn lg" href="#/funds">
-              See the funds <Icon name="arrowRight" />
+            <a className="btn lg" href="#/create">
+              Create your link <Icon name="arrowRight" />
             </a>
-            <a className="btn quiet lg" href="#/list">
-              List your fund
+            <a className="btn quiet lg" href="#/verify">
+              Verify a link
             </a>
           </div>
         </div>
@@ -276,15 +274,16 @@ function Proof() {
 const STEPS = [
   {
     n: 'I',
-    title: 'Register the fund',
-    text: 'Name it, say what it’s for, list its obligations and how long it promises to hold the reserve. The page goes live, grey.',
+    title: 'Fill in the form',
+    text: 'In the console on your laptop: name the fund, say what it’s for, list its obligations and how long it promises to hold the reserve.',
     file: 'register',
     code: `$ zsolv fund --wallet mill --id mill \\
     --name "Mill Workers' Strike Fund" \\
     --obligation "Strike pay=480" \\
     --min-held-blocks 20
 
-# the fund key is bound to "mill"`,
+# the fund key is bound to "mill"
+# the registry returns its share link`,
   },
   {
     n: 'II',
@@ -298,8 +297,8 @@ const STEPS = [
   },
   {
     n: 'III',
-    title: 'Prove and publish',
-    text: 'Every round, on your own laptop. The registry verifies it and the page turns amber, then green.',
+    title: 'Prove, publish, share the link',
+    text: 'Every round, on your own laptop. The registry verifies it, and your link turns amber, then green. Share the link; it stays the same.',
     file: 'prove',
     code: `$ zsolv prove --wallet mill --fund-id mill \\
     --threshold 480 --since 6 --out mill.json
@@ -309,10 +308,10 @@ $ zsolv submit mill.json
   },
   {
     n: 'IV',
-    title: 'Anyone verifies',
-    text: 'Donors, members or journalists rebuild the roots from public chain data and check it themselves.',
+    title: 'Anyone with the link verifies',
+    text: 'Donors, members or journalists open the link, or rebuild the roots from public chain data and check it themselves.',
     file: 'verify',
-    code: `$ curl -s $REGISTRY/api/funds/mill/attestation \\
+    code: `$ curl -s $REGISTRY/api/links/$LINK/attestation \\
     > mill.json
 $ zsolv verify mill.json
 
@@ -382,78 +381,6 @@ function How() {
               Or do it all from <code>zsolv console</code>, in your browser
             </div>
           </div>
-        </div>
-      </div>
-    </section>
-  )
-}
-
-/* ---------------- live registry metrics ---------------- */
-
-function Counter({ value }: { value: number | null }) {
-  const [n, setN] = useState(0)
-  const [ref, seen] = useInView<HTMLDivElement>(0.5)
-  useEffect(() => {
-    if (!seen || value == null) return
-    if (prefersReducedMotion()) return setN(value)
-    const start = performance.now()
-    let raf = 0
-    const tick = (now: number) => {
-      const p = Math.min((now - start) / 1600, 1)
-      setN(Math.floor((1 - Math.pow(1 - p, 3)) * value))
-      if (p < 1) raf = requestAnimationFrame(tick)
-    }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
-  }, [seen, value])
-  return (
-    <div ref={ref} className="m-value">
-      {value == null ? '–' : n.toLocaleString('en-US')}
-    </div>
-  )
-}
-
-function Live({ state }: { state: RegistryState | null }) {
-  const [time, setTime] = useState(() => new Date())
-  const [ref, seen] = useInView<HTMLElement>(0.1)
-  useEffect(() => {
-    const t = setInterval(() => setTime(new Date()), 1000)
-    return () => clearInterval(t)
-  }, [])
-  const funds = state?.funds ?? []
-  const metrics = [
-    { value: state ? funds.length : null, label: 'Funds on this registry' },
-    { value: state ? funds.filter((f) => f.status === 'green').length : null, label: 'Funds green right now' },
-    { value: state ? funds.reduce((n, f) => n + f.rounds, 0) : null, label: 'Rounds published' },
-    { value: state ? state.tip : null, label: `Chain tip, ${state?.network ?? 'connecting'}` },
-  ]
-  return (
-    <section id="registry" ref={ref} className="l-section bordered">
-      <div className="l-wrap">
-        <header className="l-head split">
-          <div>
-            <Label>Live registry</Label>
-            <h2 className={`l-h2 reveal ${seen ? 'in' : ''}`}>
-              Proofs you can
-              <br />
-              check right now.
-            </h2>
-          </div>
-          <div className="live-clock">
-            <span className="live">
-              <span className="live-dot" /> Live
-            </span>
-            <span className="sep">|</span>
-            <span>{time.toLocaleTimeString()}</span>
-          </div>
-        </header>
-        <div className="metrics">
-          {metrics.map((m, i) => (
-            <div key={m.label} className={`metric reveal ${seen ? 'in' : ''}`} style={{ transitionDelay: `${i * 100}ms` }}>
-              <Counter value={m.value} />
-              <div className="m-label">{m.label}</div>
-            </div>
-          ))}
         </div>
       </div>
     </section>
@@ -677,53 +604,66 @@ function Cases() {
   )
 }
 
-/* ---------------- funds on this registry ---------------- */
+/* ---------------- have a link? ---------------- */
 
-function Funds({ state }: { state: RegistryState | null }) {
+function HaveLink() {
   const [ref, seen] = useInView<HTMLElement>(0.1)
-  const funds = state?.funds.slice(0, 6) ?? []
+  const [value, setValue] = useState('')
+  const [error, setError] = useState<string | null>(null)
   return (
-    <section id="funds" ref={ref} className="l-section bordered-top">
-      <div className="l-wrap">
-        <header className="l-head split">
-          <div>
-            <Label>On this registry</Label>
-            <h2 className={`l-h2 reveal ${seen ? 'in' : ''}`}>
-              Funds proving
-              <br />
-              their reserves.
-            </h2>
-          </div>
-          {state && (
-            <a className="btn quiet" href="#/funds">
-              View all {state.funds.length} <Icon name="arrowRight" />
-            </a>
-          )}
-        </header>
-        {!state ? (
-          <p className="muted">Connecting to the registry…</p>
-        ) : funds.length === 0 ? (
-          <p className="muted">
-            No funds yet. <a href="#/list">Be the first to list one.</a>
+    <section id="verify" ref={ref} className="l-section bordered-top">
+      <div className="l-wrap have-grid">
+        <div>
+          <Label>Have a link?</Label>
+          <h2 className={`l-h2 reveal ${seen ? 'in' : ''}`}>
+            Funds aren’t listed.
+            <br />
+            <span className="dim">They share a link.</span>
+          </h2>
+          <p className="l-lede">
+            Nobody can browse the funds here, so nobody can make a list of who is organising. A fund gives its link to
+            the people it answers to, and anyone with the link can check the proof.
           </p>
-        ) : (
-          <ul className="fund-tiles">
-            {funds.map((f, i) => (
-              <li key={f.id} className={`reveal ${seen ? 'in' : ''}`} style={{ transitionDelay: `${i * 60}ms` }}>
-                <a href={fundHref(f.id)}>
-                  <span className="ft-top">
-                    <StatusDot status={f.status} />
-                    <Icon name="arrowUpRight" />
-                  </span>
-                  <span className="ft-name">{f.name}</span>
-                  <span className="ft-line">
-                    {f.latest ? `≥ ${zec(f.latest.threshold_zat)} ${f.unit} · since block ${f.latest.since_height}` : f.status_text}
-                  </span>
-                </a>
-              </li>
-            ))}
-          </ul>
-        )}
+        </div>
+        <form
+          className={`have-form reveal ${seen ? 'in' : ''}`}
+          noValidate
+          onSubmit={(e) => {
+            e.preventDefault()
+            const t = linkToken(value)
+            if (t) window.location.hash = linkHref(t)
+            else setError('That isn’t a Z-Solvency link. It looks like …/#/v/ followed by 32 letters and digits.')
+          }}
+        >
+          <label htmlFor="have-link" className="have-label">
+            Paste a fund’s link
+          </label>
+          <div className="have-row">
+            <input
+              id="have-link"
+              type="url"
+              inputMode="url"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder={`${window.location.host}/#/v/…`}
+              value={value}
+              onChange={(e) => {
+                setValue(e.target.value)
+                setError(null)
+              }}
+              aria-invalid={error ? true : undefined}
+              aria-describedby={error ? 'have-error' : undefined}
+            />
+            <button type="submit">
+              Verify <Icon name="arrowRight" />
+            </button>
+          </div>
+          {error && (
+            <p className="field-error" id="have-error">
+              {error}
+            </p>
+          )}
+        </form>
       </div>
     </section>
   )
@@ -756,14 +696,14 @@ function Cta() {
               </h2>
               <p>Free and open source. Your donors stay private, and your members can check the proof themselves.</p>
               <div className="hero-ctas">
-                <a className="btn lg" href="#/list">
-                  List your fund <Icon name="arrowRight" />
+                <a className="btn lg" href="#/create">
+                  Create your link <Icon name="arrowRight" />
                 </a>
-                <a className="btn quiet lg" href="#/funds">
-                  Verify a fund
+                <a className="btn quiet lg" href="#/verify">
+                  Verify a link
                 </a>
               </div>
-              <p className="cta-note">No viewing key required</p>
+              <p className="cta-note">Unlisted. No viewing key required</p>
             </div>
             <div className="cta-art">
               <AsciiCanvas shape="tetra" />
@@ -780,9 +720,9 @@ function Cta() {
 /* ---------------- footer ---------------- */
 
 const FOOT = {
-  Registry: [
-    { name: 'All funds', href: '#/funds' },
-    { name: 'List your fund', href: '#/list' },
+  Funds: [
+    { name: 'Create your link', href: '#/create' },
+    { name: 'Verify a link', href: '#/verify' },
   ],
   Learn: [
     { name: 'The proof', href: '#/?to=proof' },

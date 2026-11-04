@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { CopyLink } from '../components/CopyLink'
 import { zec } from '../format'
 import { consoleApi } from './api'
 import type { Configured, Job, Step } from './types'
@@ -130,14 +131,23 @@ export function Prove({ state, reload }: { state: Configured; reload: () => void
           ))}
         </ol>
       )}
-      {!job.running && result && (
-        <p className={result.accepted ? 'success' : 'notice'} role="status">
-          {result.accepted ? (
-            <>
-              Published round {result.round}. Your page is {result.status === 'green' ? 'green' : result.status === 'amber' ? 'amber for now' : 'updated'}.{' '}
-              <a href={result.page_url}>{result.page_url.replace(/^https?:\/\//, '')}</a>
-            </>
-          ) : result.saved ? (
+      {!job.running && result?.accepted && (
+        <div className="share-card" role="status">
+          <p>
+            Published round {result.round}. Your fund is {result.status === 'green' ? 'green' : result.status === 'amber' ? 'amber for now' : 'updated'}.
+            Share this link with your donors and members; anyone with it can check the proof. It stays the same every
+            round.
+          </p>
+          {result.page_url ? (
+            <CopyLink url={result.page_url} label="Your fund’s link" />
+          ) : (
+            <p className="hint">Save the fund page again (Register) to get its link.</p>
+          )}
+        </div>
+      )}
+      {!job.running && result && !result.accepted && (
+        <p className="notice" role="status">
+          {result.saved ? (
             <>Saved round {result.round}. {result.reason}</>
           ) : (
             <>Refused: {result.reason}</>

@@ -1,17 +1,19 @@
 import { blocks, short, span, usd, zec } from '../format'
 import type { Fund, LatestAttestation } from '../types'
 import { ContrastPanel } from './ContrastPanel'
+import { CopyLink } from './CopyLink'
 import { PastRounds } from './PastRounds'
 import { StatusLight } from './StatusLight'
 import { VerifyPanel } from './VerifyPanel'
 
-export function FundPage({ fund }: { fund: Fund }) {
+/** A fund's page, reached only through its share link. */
+export function FundPage({ fund, link }: { fund: Fund; link: string }) {
   const latest = fund.latest
   return (
     <>
-      <a className="back" href="#/funds">
-        ← All funds
-      </a>
+      <p className="shared-note">
+        You're seeing this fund because someone shared its link. It isn't listed anywhere; check the proof yourself below.
+      </p>
       <section className="card">
         <h1>{fund.name}</h1>
         {fund.description && <p className="desc">{fund.description}</p>}
@@ -23,8 +25,11 @@ export function FundPage({ fund }: { fund: Fund }) {
       </section>
       <PastRounds fund={fund} />
       <Obligations fund={fund} />
-      {latest && <VerifyPanel fundId={fund.id} latest={latest} />}
-      <ContrastPanel fund={fund} />
+      {latest && <VerifyPanel link={link} fileName={fund.id} latest={latest} />}
+      <ContrastPanel fund={fund} link={link} />
+      <section className="card">
+        <CopyLink url={`${window.location.origin}/#/v/${link}`} label="Pass this fund's link on" />
+      </section>
     </>
   )
 }

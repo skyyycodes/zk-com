@@ -75,13 +75,7 @@ export interface PastItem {
   text: string
 }
 
-export interface RegistryEvent {
-  time: string
-  fund_id: string
-  accepted: boolean
-  summary: string
-}
-
+/** Chain facts only: the registry lists no funds. A fund is reached by its share link. */
 export interface RegistryState {
   registry: string
   network: string
@@ -89,8 +83,6 @@ export interface RegistryState {
   unit: string
   tip: number
   tip_hash: string
-  funds: Fund[]
-  events: RegistryEvent[]
 }
 
 export interface HistoryEntry {

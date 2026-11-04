@@ -216,7 +216,9 @@ fn only_the_fund_key_publishes_rounds() {
     .unwrap();
     let (ok, why, _) = reg.submit(shadow, &l).unwrap();
     assert!(!ok);
-    assert!(why.contains("already counted by Mill Workers' Strike Fund"), "{why}");
+    assert!(why.contains("already counted by another fund"), "{why}");
+    // funds are unlisted: the refusal doesn't name the fund that owns the note
+    assert!(!why.contains("Mill"), "{why}");
     assert!(!reg.events.last().unwrap().accepted);
 
     // the past-rounds strip: the fund's accepted rounds, and refusals of its own signed rounds
@@ -248,4 +250,28 @@ fn fund_keys_come_from_the_wallet() {
     // its address, for receiving into the fund's own wallet
     assert!(w.unified_address("testnet").unwrap().starts_with("utest1"));
     assert!(w.unified_address("zsolv-devnet").unwrap().starts_with("uregtest1"));
+}
+
+#[test]
+fn funds_are_reached_only_by_their_link() {
+    let mut reg = Registry::new(REG);
+    let (mill, shadow) = (FundKey::generate("mill"), FundKey::generate("shadow"));
+    reg.register(sign_profile(REG, &profile("mill", "Mill"), &mill, 1).unwrap()).unwrap();
+    reg.register(sign_profile(REG, &profile("shadow", "Shadow"), &shadow, 1).unwrap()).unwrap();
+    let link = reg.funds["mill"].link.clone();
+    // 128 random bits, distinct per fund, and not the guessable id
+    assert_eq!(link.len(), 32);
+    assert!(link.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_ne!(link, reg.funds["shadow"].link);
+    assert_eq!(reg.by_link(&link).unwrap().profile.id, "mill");
+    assert!(reg.by_link("mill").is_none());
+    assert!(reg.by_link("").is_none());
+    // a profile update keeps the link
+    reg.register(sign_profile(REG, &profile("mill", "Mill (wk 2)"), &mill, 2).unwrap()).unwrap();
+    assert_eq!(reg.funds["mill"].link, link);
+    // funds saved before links existed get one, once
+    reg.funds.get_mut("shadow").unwrap().link.clear();
+    assert!(reg.ensure_links());
+    assert!(!reg.ensure_links());
+    assert_eq!(reg.funds["shadow"].link.len(), 32);
 }

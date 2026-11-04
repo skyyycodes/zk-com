@@ -2,6 +2,10 @@
 //! attestation against chain data, and refuses a registry nullifier that is
 //! already counted by another fund. Serves the reserve pages.
 //!
+//! Funds are unlisted: nothing enumerates them. Each fund gets a random link
+//! token at first registration, returned only to whoever signs as the fund,
+//! and its page, attestation and Verify are reachable only through that link.
+//!
 //! The first registration of a fund id binds the fund's public key. After
 //! that, profile changes and rounds are accepted only when that key signs
 //! them; anything else is refused without touching the fund's page. An
@@ -68,6 +72,18 @@ pub struct Fund {
     pub profile_seq: u64,
     #[serde(default)]
     pub attestations: Vec<StoredAttestation>,
+    /// The unguessable token in the fund's share link. Assigned at first
+    /// registration; the fund shares it, the registry never lists it.
+    #[serde(default)]
+    pub link: String,
+}
+
+/// A fresh link token: 128 random bits, hex.
+pub fn new_link() -> String {
+    use voting_circuits::rand::{rngs::OsRng, Rng};
+    let mut b = [0u8; 16];
+    OsRng.fill_bytes(&mut b);
+    hex::encode(b)
 }
 
 /// A profile change as sent to `POST /api/funds`. `profile` is the JSON text
@@ -237,10 +253,28 @@ impl Registry {
                         bail!("registration on this registry is by invitation: ask its operator to run `zsolv registry allow --id {id} --key {}`", u.key);
                     }
                 }
-                self.funds.insert(id.clone(), Fund { profile: p, key: u.key, profile_seq: u.seq, attestations: vec![] });
+                self.funds.insert(id.clone(), Fund { profile: p, key: u.key, profile_seq: u.seq, attestations: vec![], link: new_link() });
             }
         }
         Ok(id)
+    }
+
+    /// Give a link to funds registered before links existed. True if any changed.
+    pub fn ensure_links(&mut self) -> bool {
+        let mut changed = false;
+        for f in self.funds.values_mut().filter(|f| f.link.is_empty()) {
+            f.link = new_link();
+            changed = true;
+        }
+        changed
+    }
+
+    /// The fund a share link points to.
+    pub fn by_link(&self, link: &str) -> Option<&Fund> {
+        if link.is_empty() {
+            return None;
+        }
+        self.funds.values().find(|f| f.link == link)
     }
 
     fn event(&mut self, fund_id: &str, accepted: bool, summary: String) {
@@ -288,8 +322,8 @@ impl Registry {
         for n in a.registry_nullifiers() {
             if let Some(owner) = self.nullifier_owner.get(n) {
                 if owner != &fund_id {
-                    let owner_name = self.funds.get(owner).map(|f| f.profile.name.clone()).unwrap_or(owner.clone());
-                    let r = format!("note already counted by {owner_name} (registry nullifier {})", short(n));
+                    // Funds are unlisted, so the refusal doesn't say which fund.
+                    let r = format!("note already counted by another fund (registry nullifier {})", short(n));
                     self.event(&fund_id, false, r.clone());
                     return Ok((false, r, Some(v)));
                 }
@@ -493,32 +527,33 @@ fn handle(d: &DataDir, reg_id: &str, ledger: &Ledger, budget: Option<&mut Rebuil
     use serde_json::json;
     Ok(match (method, parts.as_slice()) {
         ("GET", ["api", "mode"]) => (200, json!({"mode": "registry"})),
+        // Chain facts only: funds are unlisted, reachable by their share link.
         ("GET", ["api", "state"]) => {
-            let funds: Vec<_> = reg.funds.values().map(|f| fund_view(f, ledger, &reg.events)).collect();
-            let mut events = reg.events.clone();
-            events.reverse();
             (200, json!({ "registry": reg.id, "network": ledger.network, "pool": ledger.pool, "unit": unit, "tip": tip,
-                          "tip_hash": ledger.block(tip)?.hash, "funds": funds, "events": events }))
+                          "tip_hash": ledger.block(tip)?.hash }))
         }
-        ("GET", ["api", "funds", id]) => match reg.funds.get(*id) {
+        ("GET", ["api", "links", link]) => match reg.by_link(link) {
             Some(f) => (200, serde_json::to_value(fund_view(f, ledger, &reg.events))?),
-            None => (404, json!({"error": "no such fund"})),
+            None => (404, json!({"error": "no fund at this link"})),
         },
-        ("GET", ["api", "funds", id, "attestation"]) => match reg.funds.get(*id).and_then(|f| f.attestations.last()) {
+        ("GET", ["api", "links", link, "attestation"]) => match reg.by_link(link).and_then(|f| f.attestations.last()) {
             Some(s) => (200, serde_json::to_value(&s.attestation)?),
             None => (404, json!({"error": "no attestation"})),
         },
-        ("POST", ["api", "funds", id, "verify"]) => match reg.funds.get(*id).and_then(|f| f.attestations.last()) {
+        ("POST", ["api", "links", link, "verify"]) => match reg.by_link(link).and_then(|f| f.attestations.last()) {
             Some(s) => {
                 let v = verify(&s.attestation, ledger);
                 (200, serde_json::to_value(v)?)
             }
             None => (404, json!({"error": "no attestation"})),
         },
-        ("GET", ["api", "funds", id, "viewing-key"]) => {
-            let p = d.public().join(format!("viewing-key-{id}.json"));
-            if p.exists() { (200, read_json(&p)?) } else { (200, serde_json::Value::Null) }
-        }
+        ("GET", ["api", "links", link, "viewing-key"]) => match reg.by_link(link) {
+            Some(f) => {
+                let p = d.public().join(format!("viewing-key-{}.json", f.profile.id));
+                if p.exists() { (200, read_json(&p)?) } else { (200, serde_json::Value::Null) }
+            }
+            None => (404, json!({"error": "no fund at this link"})),
+        },
         // Only heights already computed here: anyone may ask, so this must stay cheap.
         ("GET", ["api", "roots", h]) => {
             let h: u64 = h.parse()?;
@@ -530,9 +565,11 @@ fn handle(d: &DataDir, reg_id: &str, ledger: &Ledger, budget: Option<&mut Rebuil
         }
         ("POST", ["api", "funds"]) => {
             let u: ProfileUpdate = serde_json::from_str(body).map_err(|e| anyhow!("bad profile update: {e}"))?;
+            // Only a profile signed by the fund's key gets here, so only the fund learns its link.
             let id = reg.register(u)?;
+            reg.ensure_links();
             reg.save(d)?;
-            (200, json!({"ok": true, "id": id}))
+            (200, json!({"ok": true, "id": id, "link": reg.funds[&id].link}))
         }
         ("POST", ["api", "attest"]) => {
             let a: Attestation = serde_json::from_str(body).map_err(|e| anyhow!("bad attestation: {e}"))?;
@@ -678,7 +715,10 @@ struct Job {
 const QUEUE: usize = 16;
 
 pub fn serve(d: DataDir, reg_id: String, addr: &str, web: PathBuf, limit: RateLimit) -> Result<()> {
-    Registry::load_or_new(&d, &reg_id)?;
+    let mut reg = Registry::load_or_new(&d, &reg_id)?;
+    if reg.ensure_links() {
+        reg.save(&d)?;
+    }
     let server = tiny_http::Server::http(addr).map_err(|e| anyhow!("{e}"))?;
     eprintln!(
         "Z-Solvency registry {reg_id} on http://{addr} (POSTs: {} per minute per client; new-height root rebuilds: {} per hour)",

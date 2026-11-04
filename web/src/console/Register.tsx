@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { parseZec, span, zec } from '../format'
+import { CopyLink } from '../components/CopyLink'
 import { StatusDot } from '../components/StatusLight'
 import { consoleApi } from './api'
 import type { Configured } from './types'
@@ -207,12 +208,16 @@ export function Register({ state, reload }: { state: Configured; reload: () => v
 
       <Problem message={problem} />
       {done && (
-        <p className="success" role="status">
-          Published. Your page: <a href={done}>{done}</a>{' '}
+        <div className="share-card" role="status">
+          <p>
+            Saved. This is your fund’s link: it isn’t listed anywhere, so only people you share it with can see the
+            fund. It shows a proof once you publish one.
+          </p>
+          <CopyLink url={done} label="Your fund’s link" />
           <a className="next" href="#/reserve">
             Next: lock the reserve
           </a>
-        </p>
+        </div>
       )}
       <div className="row">
         <button type="submit" disabled={busy}>

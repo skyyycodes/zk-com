@@ -3,17 +3,17 @@ import { api } from '../api'
 import { zec } from '../format'
 import type { Fund, ViewingKeyExport } from '../types'
 
-export function ContrastPanel({ fund }: { fund: Fund }) {
+export function ContrastPanel({ fund, link }: { fund: Fund; link: string }) {
   const [vk, setVk] = useState<ViewingKeyExport | null | undefined>(undefined)
   const latest = fund.latest
 
   useEffect(() => {
     let live = true
-    api.viewingKey(fund.id).then((v) => live && setVk(v), () => live && setVk(null))
+    api.viewingKey(link).then((v) => live && setVk(v), () => live && setVk(null))
     return () => {
       live = false
     }
-  }, [fund.id])
+  }, [link])
 
   return (
     <section className="card">

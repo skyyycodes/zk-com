@@ -61,16 +61,18 @@ fi
 # Each fund signs with a key derived from its wallet. Shadow's wallet is a copy
 # of Mill's: someone who got hold of Mill's keys and starts a second fund.
 cp "$ZSOLV_DATA/wallets/mill.json" "$ZSOLV_DATA/wallets/shadow.json"
-$Z fund --url "$URL" --wallet mill --id mill --name "Mill Workers' Strike Fund" \
+# `zsolv fund` prints the registry's reply; its "link" is the fund's share-link token.
+link_of() { python3 -c 'import json,sys; print(json.load(sys.stdin)["link"])'; }
+MILL_LINK=$($Z fund --url "$URL" --wallet mill --id mill --name "Mill Workers' Strike Fund" \
   --description "Strike pay for 120 workers at the Halden textile mill. Fictional demo fund." \
   --obligation "Strike pay: 120 workers x 1 ZEC/week x 4 weeks=480" --min-held-blocks 20 \
-  --zec-usd 40 --price-time "demo price, 1 Nov 2026"
-$Z fund --url "$URL" --wallet quick --id quick --name "Quick Relief Fund" \
+  --zec-usd 40 --price-time "demo price, 1 Nov 2026" | link_of)
+QUICK_LINK=$($Z fund --url "$URL" --wallet quick --id quick --name "Quick Relief Fund" \
   --description "Claims the same reserve. Its coins arrived the block before the check." \
-  --obligation "Relief grants=480" --min-held-blocks 20 --zec-usd 40 --price-time "demo price, 1 Nov 2026"
-$Z fund --url "$URL" --wallet shadow --id shadow --name "Shadow Solidarity Fund" \
+  --obligation "Relief grants=480" --min-held-blocks 20 --zec-usd 40 --price-time "demo price, 1 Nov 2026" | link_of)
+SHADOW_LINK=$($Z fund --url "$URL" --wallet shadow --id shadow --name "Shadow Solidarity Fund" \
   --description "Tries to count the Mill Workers' reserve note as its own." \
-  --obligation "Grants=480" --min-held-blocks 20
+  --obligation "Grants=480" --min-held-blocks 20 | link_of)
 $Z viewing-key-demo --wallet mill --fund-id mill
 
 step "Mill Workers prove: at least 480 ZEC, held since X=$X, checked at H=$H"
@@ -92,5 +94,8 @@ step "Cheat 2: Shadow fund submits the same note"
 $Z prove --wallet shadow --fund-id shadow --threshold 480 --since "$X" --at "$H" --out attestations/shadow.json
 $Z submit attestations/shadow.json --url "$URL" || true
 
-step "Done. Open $URL"
+step "Done. Open $URL. Funds are unlisted; each one's share link:"
+echo "  Mill Workers' Strike Fund   $URL/#/v/$MILL_LINK"
+echo "  Quick Relief Fund           $URL/#/v/$QUICK_LINK"
+echo "  Shadow Solidarity Fund      $URL/#/v/$SHADOW_LINK"
 echo "Treasurer's console for Mill: ./target/release/zsolv console   (choose \"Open a wallet already here\", then mill)"

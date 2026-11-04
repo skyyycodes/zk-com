@@ -61,6 +61,18 @@ fn treasurer_journey() {
     let st = c.state().unwrap();
     assert_eq!(st["fund"]["registry"]["status"], "none");
     assert_eq!(st["fund"]["registry"]["key"], st["fund"]["key"], "the registry holds the key derived from this wallet");
+    // the share link: an unguessable token, and the only way in
+    let share = st["fund"]["page_url"].as_str().unwrap().to_string();
+    let link = share.rsplit("/#/v/").next().unwrap().to_string();
+    assert!(share.starts_with(&format!("{url}/#/v/")) && link.len() == 32, "{share}");
+    let get = |path: &str| ureq::get(&format!("{url}{path}")).call().map(|r| r.status()).unwrap_or_else(|e| match e {
+        ureq::Error::Status(code, _) => code,
+        e => panic!("{e}"),
+    });
+    assert_eq!(get(&format!("/api/links/{link}")), 200);
+    assert_eq!(get("/api/funds/mill"), 404, "funds aren't reachable by id");
+    let state: Value = serde_json::from_str(&ureq::get(&format!("{url}/api/state")).call().unwrap().into_string().unwrap()).unwrap();
+    assert!(state.get("funds").is_none() && state.get("events").is_none(), "the registry lists no funds: {state}");
 
     // 3. Lock exactly T = the obligations
     let r = c.reserve().unwrap();
@@ -104,9 +116,14 @@ fn treasurer_journey() {
     assert!(st["pending"].as_array().unwrap().is_empty());
     assert_eq!(st["fund"]["registry"]["rounds"], 2);
 
-    // a second console opening the same wallet finds its fund
+    // a second console opening the same wallet: nothing is listed, so it registers
+    // the same id again; the derived key matches and the registry returns the same link
     std::fs::remove_file(&cfg_path).unwrap();
     let s = c.setup(SetupReq { mode: "existing".into(), network: "devnet".into(), registry_url: url, wallet: Some("fund".into()), words: None, birthday: None, server: None }).unwrap();
-    assert_eq!(s["fund_id"], "mill");
+    assert_eq!(s["fund_id"], Value::Null);
+    let obligations = vec![Obligation { label: "Strike pay: 120 workers x 1 ZEC x 4 weeks".into(), zat: 480 * COIN }];
+    let r = c.register(RegisterReq { id: "mill".into(), name: "Mill Workers' Strike Fund".into(), description: "Strike pay".into(), obligations, min_held_blocks: 3, max_proof_age_blocks: 8064 }).unwrap();
+    assert_eq!(r["page_url"], share);
+    assert_eq!(c.state().unwrap()["fund"]["registry"]["rounds"], 2);
     let _ = std::fs::remove_dir_all(dir);
 }

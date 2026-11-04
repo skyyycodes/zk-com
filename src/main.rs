@@ -500,7 +500,7 @@ fn run() -> Result<()> {
                 let mut reg = Registry::load_or_new(&d, &registry)?;
                 reg.register(u)?;
                 reg.save(&d)?;
-                println!("fund {id} registered");
+                println!("fund {id} registered; share link token {}", reg.funds[&id].link);
             }
         }
         Cmd::Submit { file, url } => {

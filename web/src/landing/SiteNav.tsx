@@ -7,7 +7,7 @@ export const LINKS = [
   { name: 'The proof', href: '#/?to=proof' },
   { name: 'How it works', href: '#/?to=how' },
   { name: 'Privacy', href: '#/?to=privacy' },
-  { name: 'Funds', href: '#/funds' },
+  { name: 'Verify a link', href: '#/verify' },
 ]
 
 /** Smooth-scroll to a landing section when it is already on the page. */
@@ -40,7 +40,7 @@ export function SiteNav({ state, error, route }: { state: RegistryState | null; 
     }
   }, [open])
 
-  const current = (href: string) => (href === '#/funds' && (route === '/funds' || route.startsWith('/fund/')) ? 'page' : undefined)
+  const current = (href: string) => (href === '#/verify' && (route === '/verify' || route.startsWith('/v/')) ? 'page' : undefined)
 
   return (
     <header className={`site-nav ${floating ? 'is-floating' : ''} ${open ? 'is-open' : ''}`}>
@@ -60,8 +60,8 @@ export function SiteNav({ state, error, route }: { state: RegistryState | null; 
 
         <div className="site-cta">
           <span className={`chain ${error ? 'offline' : ''}`}>{error ? 'offline' : state ? `tip ${state.tip}` : '…'}</span>
-          <a className="btn sm" href="#/list" aria-current={route === '/list' ? 'page' : undefined}>
-            List your fund
+          <a className="btn sm" href="#/create" aria-current={route === '/create' ? 'page' : undefined}>
+            Create your link
           </a>
         </div>
 
@@ -87,11 +87,11 @@ export function SiteNav({ state, error, route }: { state: RegistryState | null; 
           ))}
         </div>
         <div className="mobile-ctas">
-          <a className="btn quiet lg" href="#/funds" onClick={() => setOpen(false)}>
-            See the funds
+          <a className="btn quiet lg" href="#/verify" onClick={() => setOpen(false)}>
+            Verify a link
           </a>
-          <a className="btn lg" href="#/list" onClick={() => setOpen(false)}>
-            List your fund
+          <a className="btn lg" href="#/create" onClick={() => setOpen(false)}>
+            Create your link
           </a>
         </div>
       </div>

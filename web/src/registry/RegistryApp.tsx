@@ -1,19 +1,30 @@
-import { FundPage } from '../components/FundPage'
-import { Home } from '../components/Home'
-import { ListFund } from '../components/ListFund'
+import { Create } from '../components/Create'
+import { LinkedFund } from '../components/LinkedFund'
+import { VerifyLink } from '../components/VerifyLink'
 import { useRegistry, useRoute } from '../hooks'
 import { Landing } from '../landing/Landing'
 import { SiteNav } from '../landing/SiteNav'
 
+/**
+ * The public site: the landing page, how to create a fund's link, and the
+ * fund behind a link. There is no list of funds; a fund is reached only by
+ * the link its treasurer shares.
+ */
 export function RegistryApp() {
   const { state, error } = useRegistry()
   const route = useRoute()
   // "/?to=how" is the landing page, scrolled to a section.
   const [path, query = ''] = route.split('?')
-  const fundId = path.match(/^\/fund\/(.+)$/)?.[1]
+  const link = path.match(/^\/v\/([0-9a-fA-F]+)$/)?.[1]
 
-  // The landing page explains the idea on its own, so it renders before the registry answers.
-  if (path === '/') {
+  let body
+  if (path === '/create' || path === '/list') {
+    body = <Create />
+  } else if (path === '/verify') {
+    body = <VerifyLink />
+  } else if (link) {
+    body = <LinkedFund link={link.toLowerCase()} />
+  } else {
     return (
       <>
         <SiteNav state={state} error={error} route={route} />
@@ -22,29 +33,6 @@ export function RegistryApp() {
         </main>
       </>
     )
-  }
-
-  let body
-  if (path === '/list') {
-    body = <ListFund />
-  } else if (!state) {
-    body = (
-      <div className="empty" role="status">
-        {error ? `Can't reach the registry (${error}). Trying again every few seconds.` : 'Loading registry…'}
-      </div>
-    )
-  } else if (fundId) {
-    const fund = state.funds.find((f) => f.id === decodeURIComponent(fundId))
-    body = fund ? (
-      // key: a different fund starts with a fresh verify panel
-      <FundPage key={fund.id} fund={fund} />
-    ) : (
-      <div className="empty">
-        No fund called “{decodeURIComponent(fundId)}” in this registry. <a href="#/funds">See all funds</a>
-      </div>
-    )
-  } else {
-    body = <Home state={state} />
   }
 
   return (

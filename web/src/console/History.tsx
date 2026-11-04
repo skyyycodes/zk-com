@@ -1,10 +1,19 @@
 import { ago } from '../format'
+import { CopyLink } from '../components/CopyLink'
 import { StatusDot } from '../components/StatusLight'
 import type { Configured } from './types'
 
 export function History({ state }: { state: Configured }) {
   const past = [...(state.fund?.registry?.past ?? [])].reverse()
+  const link = state.fund?.page_url
   return (
+    <>
+    {link && (
+      <section className="card">
+        <CopyLink url={link} label="Your fund’s link" />
+        <p className="hint spaced">Unlisted: only people you share it with can see the fund. It stays the same every round.</p>
+      </section>
+    )}
     <section className="card">
       <h1>Past rounds</h1>
       {state.pending.length === 0 && past.length === 0 ? (
@@ -47,5 +56,6 @@ export function History({ state }: { state: Configured }) {
         </table>
       )}
     </section>
+    </>
   )
 }

@@ -13,7 +13,8 @@ export interface JobResult {
   round: number
   reason?: string | null
   claim: string
-  page_url: string
+  /** The share link, or null if the registry hasn't returned one yet. */
+  page_url: string | null
   status?: Status | null
 }
 
@@ -62,7 +63,7 @@ export interface Configured {
     reserve: ReserveNote | null
     notes: number
   }
-  fund: { id: string; key: string; page_url: string; registry: Fund | null } | null
+  fund: { id: string; key: string; page_url: string | null; registry: Fund | null } | null
   registry_error: string | null
   pending: PendingRound[]
   job: Job

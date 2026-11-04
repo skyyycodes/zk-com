@@ -51,33 +51,34 @@ if ! curl -s "$URL/api/state" >/dev/null 2>&1; then
   for i in $(seq 1 100); do curl -s "$URL/api/state" >/dev/null 2>&1 && break; sleep 0.3; done
   LOCAL=1
 fi
-fund() { $Z fund --url "$URL" --registry "$REG" "$@"; }
-# The fund's next round on that registry (1 if it has none).
+# Prints the fund's share-link token from the registry's reply.
+fund() { $Z fund --url "$URL" --registry "$REG" "$@" | python3 -c 'import json,sys; print(json.load(sys.stdin)["link"])'; }
+# The fund's next round on that registry (1 if it has none), read through its link.
 next_round() {
-  curl -s "$URL/api/funds/$1" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(((d.get("latest") or {}).get("round") or 0) + 1)' 2>/dev/null || echo 1
+  curl -s "$URL/api/links/$1" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(((d.get("latest") or {}).get("round") or 0) + 1)' 2>/dev/null || echo 1
 }
 # Shadow's wallet is a copy of Mill's: someone who got hold of Mill's keys.
 cp "$ZSOLV_DATA/wallets/mill.json" "$ZSOLV_DATA/wallets/shadow.json"
-fund --wallet mill --id mill --name "Mill Workers' Strike Fund" \
+MILL_LINK=$(fund --wallet mill --id mill --name "Mill Workers' Strike Fund" \
   --description "Strike pay for 120 workers at the Halden textile mill. Fictional demo fund, real Ironwood testnet notes." \
-  --obligation "Strike pay: 120 workers x 1 TAZ/week x 4 weeks=480" --min-held-blocks 20
-fund --wallet shadow --id shadow --name "Shadow Solidarity Fund" \
-  --description "Tries to count the Mill Workers' reserve note as its own." --obligation "Grants=480" --min-held-blocks 20
+  --obligation "Strike pay: 120 workers x 1 TAZ/week x 4 weeks=480" --min-held-blocks 20)
+SHADOW_LINK=$(fund --wallet shadow --id shadow --name "Shadow Solidarity Fund" \
+  --description "Tries to count the Mill Workers' reserve note as its own." --obligation "Grants=480" --min-held-blocks 20)
 
 step "Mill Workers prove: at least $T TAZ, held since X=$X, checked at H=$H"
-$Z prove --wallet mill --fund-id mill --registry "$REG" --threshold $T --since "$X" --at "$H" --round "$(next_round mill)" --out attestations-testnet/mill.json
+$Z prove --wallet mill --fund-id mill --registry "$REG" --threshold $T --since "$X" --at "$H" --round "$(next_round "$MILL_LINK")" --out attestations-testnet/mill.json
 $Z verify attestations-testnet/mill.json
 $Z submit attestations-testnet/mill.json --url "$URL"
 
 if [ -n "${QUICK_MNEMONIC:-}" ]; then
   step "Cheat 1: Quick Relief claims 'held since X' with borrowed coins"
   [ -f "$ZSOLV_DATA/wallets/quick.json" ] || ZSOLV_MNEMONIC="$QUICK_MNEMONIC" $Z wallet import quick --birthday "$BIRTHDAY"
-  fund --wallet quick --id quick --name "Quick Relief Fund" \
-    --description "Claims the same reserve. Its coins arrived just before the check." --obligation "Relief grants=480" --min-held-blocks 20
+  QUICK_LINK=$(fund --wallet quick --id quick --name "Quick Relief Fund" \
+    --description "Claims the same reserve. Its coins arrived just before the check." --obligation "Relief grants=480" --min-held-blocks 20)
   $Z wallet scan quick
   $Z reserve --wallet quick --amount $T
   $Z prove --wallet quick --fund-id quick --registry "$REG" --threshold $T --since "$X" --at "$H" --out attestations-testnet/quick-cheat.json || true
-  R=$(next_round quick)
+  R=$(next_round "$QUICK_LINK")
   $Z prove --wallet quick --fund-id quick --registry "$REG" --threshold $T --at "$H" --round "$R" --cheat-claim-since "$X" --out attestations-testnet/quick-relabel.json
   $Z submit attestations-testnet/quick-relabel.json --url "$URL" || true
   echo "-- the honest claim is all it can make: held since its coins arrived"
@@ -88,9 +89,12 @@ else
 fi
 
 step "Cheat 2: Shadow fund submits the same note"
-$Z prove --wallet shadow --fund-id shadow --registry "$REG" --threshold $T --since "$X" --at "$H" --round "$(next_round shadow)" --out attestations-testnet/shadow.json
+$Z prove --wallet shadow --fund-id shadow --registry "$REG" --threshold $T --since "$X" --at "$H" --round "$(next_round "$SHADOW_LINK")" --out attestations-testnet/shadow.json
 $Z submit attestations-testnet/shadow.json --url "$URL" || true
 rm "$ZSOLV_DATA/wallets/shadow.json"
+echo "Share links (funds are unlisted):"
+echo "  Mill Workers' Strike Fund   $URL/#/v/$MILL_LINK"
+echo "  Shadow Solidarity Fund      $URL/#/v/$SHADOW_LINK"
 
 if [ -n "$LOCAL" ]; then
   step "Snapshot for hack day (public data only: no wallets or fund keys)"

@@ -35,6 +35,9 @@ pub struct Config {
     pub wallet: String,
     #[serde(default)]
     pub fund_id: Option<String>,
+    /// The fund's share-link token, as the registry returned it on registration.
+    #[serde(default)]
+    pub link: Option<String>,
     /// The lightwalletd server testnet chain data comes from.
     #[serde(default = "default_server")]
     pub server: String,
@@ -94,8 +97,15 @@ fn error_of(v: &Value) -> String {
     v.get("error").and_then(|e| e.as_str()).unwrap_or("unexpected reply from the registry").to_string()
 }
 
-fn registry_fund(c: &Config, id: &str) -> std::result::Result<Option<Value>, String> {
-    match http("GET", &format!("{}/api/funds/{id}", c.registry_url), None)? {
+/// The share link anyone can open to see and verify the fund's proof.
+fn share_url(c: &Config) -> Option<String> {
+    c.link.as_ref().map(|l| format!("{}/#/v/{l}", c.registry_url))
+}
+
+/// The fund's page data, read through its share link (the registry lists nothing).
+fn registry_fund(c: &Config) -> std::result::Result<Option<Value>, String> {
+    let Some(link) = &c.link else { return Ok(None) };
+    match http("GET", &format!("{}/api/links/{link}", c.registry_url), None)? {
         (200, v) => Ok(Some(v)),
         (404, _) => Ok(None),
         (_, v) => Err(error_of(&v)),
@@ -224,12 +234,13 @@ impl Console {
             None => (Value::Null, None),
             Some(id) => {
                 let key = FundKey::derive(&w.sk()?, id).public()?;
-                let (view, err) = match registry_fund(&c, id) {
+                let (view, err) = match registry_fund(&c) {
                     Ok(Some(v)) => (v, None),
+                    Ok(None) if c.link.is_none() => (Value::Null, Some("save the fund page again to get its share link".to_string())),
                     Ok(None) => (Value::Null, Some("this fund isn't on the registry".to_string())),
                     Err(e) => (Value::Null, Some(format!("can't reach the registry: {e}"))),
                 };
-                (json!({ "id": id, "key": key, "page_url": format!("{}/#/fund/{id}", c.registry_url), "registry": view }), err)
+                (json!({ "id": id, "key": key, "page_url": share_url(&c), "registry": view }), err)
             }
         };
         Ok(json!({
@@ -305,8 +316,8 @@ impl Console {
             })
         };
         let mut words = None;
-        let w = match r.mode.as_str() {
-            "existing" => self.wallet(&Config { network: network.into(), registry_url: registry_url.clone(), registry_id: registry_id.clone(), wallet: name.clone(), fund_id: None, server: server.clone(), last_round: 0 })
+        match r.mode.as_str() {
+            "existing" => self.wallet(&Config { network: network.into(), registry_url: registry_url.clone(), registry_id: registry_id.clone(), wallet: name.clone(), fund_id: None, link: None, server: server.clone(), last_round: 0 })
                 .map_err(|_| anyhow!("no wallet named {name} in {}", self.d.0.display()))?,
             "create" | "import" => {
                 if self.d.wallet(&name).exists() {
@@ -328,15 +339,12 @@ impl Console {
             }
             other => bail!("unknown setup mode {other}"),
         };
-        // A fund this wallet already registered: its derived key is the one on file.
-        let sk = w.sk()?;
-        let fund_id = state["funds"].as_array().into_iter().flatten().find_map(|f| {
-            let id = f["id"].as_str()?;
-            (f["key"].as_str()? == FundKey::derive(&sk, id).public().ok()?).then(|| id.to_string())
-        });
-        let c = Config { network: network.into(), registry_url, registry_id, wallet: name, fund_id: fund_id.clone(), server, last_round: 0 };
+        // The registry lists no funds, so a fund this wallet registered before is
+        // found again by registering the same id: its derived key matches, and
+        // the registry returns the fund's link.
+        let c = Config { network: network.into(), registry_url, registry_id, wallet: name, fund_id: None, link: None, server, last_round: 0 };
         write_json(&self.d.console(), &c)?;
-        Ok(json!({ "ok": true, "words": words, "fund_id": fund_id }))
+        Ok(json!({ "ok": true, "words": words, "fund_id": Value::Null }))
     }
 
     /// Step 2: sign the profile with the fund key and publish the fund page.
@@ -362,22 +370,23 @@ impl Console {
         check_profile(&p)?;
         let key = FundKey::derive(&w.sk()?, &p.id);
         let u = sign_profile(&c.registry_id, &p, &key, now_ms())?;
-        match http("POST", &format!("{}/api/funds", c.registry_url), Some(&serde_json::to_string(&u)?)) {
-            Ok((200, _)) => {}
+        let link = match http("POST", &format!("{}/api/funds", c.registry_url), Some(&serde_json::to_string(&u)?)) {
+            Ok((200, v)) => v["link"].as_str().map(str::to_string),
             Ok((_, v)) => bail!("{}", error_of(&v)),
             Err(e) => bail!("can't reach the registry: {e}"),
-        }
+        };
         c.fund_id = Some(p.id.clone());
+        c.link = link.or(c.link);
         write_json(&self.d.console(), &c)?;
-        Ok(json!({ "ok": true, "id": p.id, "page_url": format!("{}/#/fund/{}", c.registry_url, p.id) }))
+        Ok(json!({ "ok": true, "id": p.id, "page_url": share_url(&c) }))
     }
 
     /// Step 3: one note of exactly T, the obligations rounded up to 0.125.
     pub fn reserve(&self) -> Result<Value> {
         self.need_idle()?;
         let c = self.need_config()?;
-        let id = c.fund_id.clone().ok_or_else(|| anyhow!("register the fund first"))?;
-        let view = registry_fund(&c, &id).map_err(|e| anyhow!("can't reach the registry: {e}"))?.ok_or_else(|| anyhow!("the fund isn't on the registry"))?;
+        c.fund_id.as_ref().ok_or_else(|| anyhow!("register the fund first"))?;
+        let view = registry_fund(&c).map_err(|e| anyhow!("can't reach the registry: {e}"))?.ok_or_else(|| anyhow!("the fund isn't on the registry"))?;
         let obligations = view["obligations_zat"].as_u64().unwrap_or(0);
         if obligations == 0 {
             bail!("add the fund's obligations first: the reserve covers them");
@@ -529,7 +538,7 @@ impl Console {
         self.label(1, format!("Proof at block {x}"));
         self.label(2, format!("Proof at block {h}"));
 
-        let latest = registry_fund(c, fund_id).ok().flatten();
+        let latest = registry_fund(c).ok().flatten();
         let pending_max = self.pending().iter().filter_map(|p| p["round"].as_u64()).max().unwrap_or(0);
         let round = latest.as_ref().and_then(|v| v["latest"]["round"].as_u64()).unwrap_or(0).max(pending_max).max(c.last_round) + 1;
 
@@ -582,7 +591,7 @@ impl Console {
         // 6. Publish; keep the round to retry if the registry can't take it now.
         self.step(5, "running", None, None);
         let t2 = Instant::now();
-        let page_url = format!("{}/#/fund/{fund_id}", c.registry_url);
+        let page_url = share_url(c);
         let body = serde_json::to_string(&a)?;
         let claim = format!("at least {} {unit} · held since block {x} · checked at block {h}", zec(t));
         let reply = http("POST", &format!("{}/api/attest", c.registry_url), Some(&body));
@@ -598,7 +607,7 @@ impl Console {
             Ok((200, v)) => {
                 self.published(round)?;
                 self.step(5, "done", Some(t2.elapsed().as_millis() as u64), Some(format!("round {round}")));
-                let light = registry_fund(c, fund_id).ok().flatten().map(|f| f["status"].clone()).unwrap_or(Value::Null);
+                let light = registry_fund(c).ok().flatten().map(|f| f["status"].clone()).unwrap_or(Value::Null);
                 Ok(json!({ "accepted": true, "round": round, "reason": v["reason"], "claim": claim, "page_url": page_url, "status": light }))
             }
             Ok((_, v)) => {
