@@ -1,5 +1,5 @@
 import type { Obligation } from '../types'
-import type { ConsoleState, Job } from './types'
+import type { CertRequest, CheckResult, Compliance, ConsoleState, Inbox, Job } from './types'
 
 const KEY = 'zsolv-console-token'
 let token: string | null = null
@@ -84,4 +84,12 @@ export const consoleApi = {
   pay: (b: MoveBody) => call<{ height: number }>('POST', 'pay', b),
   mine: (blocks: number) => call<{ tip: number }>('POST', 'mine', { blocks }),
   sync: () => call<{ tip: number; notes: number }>('POST', 'sync', {}),
+  compliance: () => call<Compliance>('GET', 'compliance'),
+  requestCertificate: (b: { authority_key: string; round?: number; note: string }) => call<CertRequest>('POST', 'certificate-request', b),
+  // the authority console
+  authoritySetup: (b: { name: string; role: string; registry_url: string }) => call<{ ok: boolean; key: string }>('POST', 'authority-setup', b),
+  inbox: () => call<Inbox>('GET', 'inbox'),
+  check: (request_id: string) => call<CheckResult>('POST', 'check', { request_id }),
+  issue: (request_id: string, note: string) => call<CertRequest>('POST', 'issue', { request_id, note }),
+  decline: (request_id: string, reason: string) => call<CertRequest>('POST', 'decline', { request_id, reason }),
 }

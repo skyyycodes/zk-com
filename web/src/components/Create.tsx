@@ -7,7 +7,7 @@ export function Create() {
         <h1>Create your fund’s link</h1>
         <p className="desc">
           The form runs on your own laptop, in the fund console, because it holds the fund’s keys and makes the proof.
-          At the end it gives you one link. Share it with donors and members: anyone with the link can check the proof.
+          At the end it gives you one link. Share it with your auditors, clients and counterparties: anyone with the link can check the proof.
           Nobody can find your fund without it.
         </p>
       </section>

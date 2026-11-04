@@ -16,6 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::attest::{prove, verify, Attestation, ProveRequest};
+use crate::compliance::{
+    check_name, check_role, decline_message, fund_read_message, inbox_message, issue, request_message, unix_now, IssuerKey, Signed,
+};
 use crate::fundkey::FundKey;
 use crate::ledger::{Ledger, DEVNET, TESTNET, TESTNET_IRONWOOD_ACTIVATION};
 use crate::registry::{check_profile, guarded, sign_profile, static_file, Obligation, Profile};
@@ -73,6 +76,60 @@ pub struct Job {
 pub struct Console {
     pub d: DataDir,
     job: Arc<Mutex<Job>>,
+    /// Run for an auditor, regulator or compliance body instead of a fund.
+    pub authority: bool,
+}
+
+/// An authority's console settings and signing key (`authority.json`, secret).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AuthorityConfig {
+    pub network: String,
+    pub registry_url: String,
+    pub registry_id: String,
+    pub key: IssuerKey,
+}
+
+/// The registry's id and network at `url`, checked to be a Z-Solvency registry.
+fn registry_at(url: &str) -> Result<(String, String, Value)> {
+    let url = url.trim().trim_end_matches('/').to_string();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        bail!("the registry address must start with http:// or https://");
+    }
+    let state = match http("GET", &format!("{url}/api/state"), None) {
+        Ok((200, v)) => v,
+        Ok((_, v)) => bail!("that registry answered: {}", error_of(&v)),
+        Err(e) => bail!("can't reach a registry at {url}: {e}"),
+    };
+    let id = state["registry"].as_str().ok_or_else(|| anyhow!("that address isn't a Z-Solvency registry"))?.to_string();
+    Ok((url, id, state))
+}
+
+/// Create an authority's signing key and settings in `d`. Its public key is
+/// what the registry operator approves.
+pub fn create_authority(d: &DataDir, name: &str, role: &str, registry_url: &str) -> Result<AuthorityConfig> {
+    if d.authority().exists() {
+        bail!("{} already holds an authority key", d.authority().display());
+    }
+    check_name(name)?;
+    check_role(role)?;
+    let (registry_url, registry_id, state) = registry_at(registry_url)?;
+    let network = state["network"].as_str().unwrap_or(DEVNET).to_string();
+    let c = AuthorityConfig { network, registry_url, registry_id, key: IssuerKey::generate(name.trim(), role) };
+    write_secret_json(&d.authority(), &c)?;
+    Ok(c)
+}
+
+fn signed(key_pub: String, time: u64, signature: String) -> Signed {
+    Signed { key: key_pub, time, signature }
+}
+
+/// POST to the registry; its JSON on 200, its error otherwise.
+fn post(url: &str, body: &Value) -> Result<Value> {
+    match http("POST", url, Some(&serde_json::to_string(body)?)) {
+        Ok((200, v)) => Ok(v),
+        Ok((_, v)) => bail!("{}", error_of(&v)),
+        Err(e) => bail!("can't reach the registry: {e}"),
+    }
 }
 
 // ------------------------------------------------------------ registry client
@@ -161,7 +218,180 @@ pub struct MoveReq {
 
 impl Console {
     pub fn new(d: DataDir) -> Self {
-        Console { d, job: Arc::new(Mutex::new(Job::default())) }
+        Console { d, job: Arc::new(Mutex::new(Job::default())), authority: false }
+    }
+
+    /// A console for an auditor, regulator or compliance body.
+    pub fn for_authority(d: DataDir) -> Self {
+        Console { d, job: Arc::new(Mutex::new(Job::default())), authority: true }
+    }
+
+    // ------------------------------------------------- compliance: the fund's side
+
+    fn fund_key(&self) -> Result<(Config, FundKey)> {
+        let c = self.need_config()?;
+        let id = c.fund_id.clone().ok_or_else(|| anyhow!("register the fund first"))?;
+        let w = self.wallet(&c)?;
+        let k = FundKey::derive(&w.sk()?, &id);
+        Ok((c, k))
+    }
+
+    /// Approved authorities, this fund's certificates and its requests.
+    pub fn compliance(&self) -> Result<Value> {
+        let (c, k) = self.fund_key()?;
+        let (pk, t) = (k.public()?, unix_now());
+        let sig = k.sign(&fund_read_message(&c.registry_id, &k.fund_id, &pk, t))?;
+        let mine = post(&format!("{}/api/certificates/fund", c.registry_url), &json!({ "fund_id": k.fund_id, "signed": signed(pk, t, sig) }))?;
+        let authorities = match http("GET", &format!("{}/api/authorities", c.registry_url), None) {
+            Ok((200, v)) => v,
+            _ => json!([]),
+        };
+        let view = registry_fund(&c).ok().flatten();
+        let rounds: Vec<u64> = view
+            .as_ref()
+            .and_then(|v| v["past"].as_array().cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter(|p| p["accepted"].as_bool() == Some(true))
+            .filter_map(|p| p["round"].as_u64())
+            .collect();
+        Ok(json!({
+            "fund_id": k.fund_id,
+            "fund_name": view.as_ref().and_then(|v| v["name"].as_str().map(str::to_string)),
+            "unit": if c.network == TESTNET { "TAZ" } else { "ZEC" },
+            "authorities": authorities,
+            "rounds": rounds,
+            "registry_certificates": mine["registry_certificates"],
+            "requests": mine["requests"],
+        }))
+    }
+
+    /// Ask an approved authority to certify a published round (the latest by default).
+    pub fn request_certificate(&self, r: Value) -> Result<Value> {
+        let (c, k) = self.fund_key()?;
+        let authority = r["authority_key"].as_str().ok_or_else(|| anyhow!("choose an authority"))?.to_string();
+        let note = r["note"].as_str().unwrap_or("").trim().to_string();
+        let round = match r["round"].as_u64() {
+            Some(n) => n,
+            None => registry_fund(&c)
+                .ok()
+                .flatten()
+                .and_then(|v| v["latest"]["round"].as_u64())
+                .ok_or_else(|| anyhow!("publish a round first: there is nothing to certify yet"))?,
+        };
+        let (pk, t) = (k.public()?, unix_now());
+        let sig = k.sign(&request_message(&c.registry_id, &k.fund_id, &authority, round, &note, t))?;
+        post(
+            &format!("{}/api/certificates/request", c.registry_url),
+            &json!({ "fund_id": k.fund_id, "authority_key": authority, "round": round, "note": note, "signed": signed(pk, t, sig) }),
+        )
+    }
+
+    // --------------------------------------------- compliance: the authority's side
+
+    fn authority_config(&self) -> Result<Option<AuthorityConfig>> {
+        let p = self.d.authority();
+        if p.exists() { Ok(Some(read_json(&p)?)) } else { Ok(None) }
+    }
+
+    fn need_authority(&self) -> Result<AuthorityConfig> {
+        self.authority_config()?.ok_or_else(|| anyhow!("set up the authority console first"))
+    }
+
+    pub fn authority_state(&self) -> Result<Value> {
+        let Some(a) = self.authority_config()? else {
+            return Ok(json!({ "mode": "authority", "configured": false }));
+        };
+        let key = a.key.public()?;
+        let (approved, registry_error) = match http("GET", &format!("{}/api/authorities", a.registry_url), None) {
+            Ok((200, v)) => (v.as_array().map(|l| l.iter().any(|x| x["key"].as_str() == Some(&key))).unwrap_or(false), None),
+            Ok((_, v)) => (false, Some(error_of(&v))),
+            Err(e) => (false, Some(format!("can't reach the registry: {e}"))),
+        };
+        let tip = Ledger::load(&self.d.ledger()).ok().map(|l| l.tip());
+        Ok(json!({
+            "mode": "authority",
+            "configured": true,
+            "name": a.key.name,
+            "role": a.key.role,
+            "key": key,
+            "approved": approved,
+            "network": a.network,
+            "registry_url": a.registry_url,
+            "registry_id": a.registry_id,
+            "data_dir": self.d.0.display().to_string(),
+            "tip": tip,
+            "registry_error": registry_error,
+        }))
+    }
+
+    pub fn authority_setup(&self, r: Value) -> Result<Value> {
+        let a = create_authority(
+            &self.d,
+            r["name"].as_str().unwrap_or(""),
+            r["role"].as_str().unwrap_or(""),
+            r["registry_url"].as_str().unwrap_or(""),
+        )?;
+        Ok(json!({ "ok": true, "key": a.key.public()? }))
+    }
+
+    pub fn inbox(&self) -> Result<Value> {
+        let a = self.need_authority()?;
+        let (pk, t) = (a.key.public()?, unix_now());
+        let sig = a.key.sign(&inbox_message(&a.registry_id, &pk, t))?;
+        post(&format!("{}/api/certificates/inbox", a.registry_url), &serde_json::to_value(signed(pk, t, sig))?)
+    }
+
+    /// One request from the inbox, with its attestation.
+    fn inbox_item(&self, id: &str) -> Result<(AuthorityConfig, Value, Attestation)> {
+        let a = self.need_authority()?;
+        let inbox = self.inbox()?;
+        let item = inbox["requests"]
+            .as_array()
+            .and_then(|l| l.iter().find(|x| x["request"]["id"].as_str() == Some(id)).cloned())
+            .ok_or_else(|| anyhow!("no request {id} in your inbox"))?;
+        let att: Attestation = serde_json::from_value(item["attestation"].clone()).map_err(|_| anyhow!("the round for request {id} is missing on the registry"))?;
+        Ok((a, item, att))
+    }
+
+    /// Re-verify the round on this machine, against this machine's chain data.
+    fn verify_here(&self, att: &Attestation) -> Result<crate::attest::Verdict> {
+        let l = Ledger::load(&self.d.ledger())
+            .map_err(|_| anyhow!("no chain data in {}: sync it first (zsolv testnet sync), so you check the proof against your own copy", self.d.0.display()))?;
+        if l.tip() < att.at_height {
+            bail!("your chain data ends at block {}, before the round's block {}: sync first", l.tip(), att.at_height);
+        }
+        Ok(verify(att, &l))
+    }
+
+    pub fn check_request(&self, r: Value) -> Result<Value> {
+        let id = r["request_id"].as_str().unwrap_or("");
+        let (_, _, att) = self.inbox_item(id)?;
+        let t0 = Instant::now();
+        let v = self.verify_here(&att)?;
+        Ok(json!({ "verdict": v, "ms": t0.elapsed().as_millis() as u64 }))
+    }
+
+    pub fn issue_request(&self, r: Value) -> Result<Value> {
+        let id = r["request_id"].as_str().unwrap_or("");
+        let note = r["note"].as_str().unwrap_or("");
+        let (a, item, att) = self.inbox_item(id)?;
+        if item["request"]["status"].as_str() != Some("pending") {
+            bail!("request {id} is already {}", item["request"]["status"].as_str().unwrap_or("closed"));
+        }
+        let v = self.verify_here(&att)?;
+        let name = item["fund_name"].as_str().unwrap_or(&att.fund_id).to_string();
+        let cert = issue("authority", &a.key, &att, &v, &name, note)?;
+        post(&format!("{}/api/certificates/issue", a.registry_url), &json!({ "request_id": id, "certificate": cert }))
+    }
+
+    pub fn decline_request(&self, r: Value) -> Result<Value> {
+        let a = self.need_authority()?;
+        let id = r["request_id"].as_str().unwrap_or("").to_string();
+        let reason = r["reason"].as_str().unwrap_or("").trim().to_string();
+        let (pk, t) = (a.key.public()?, unix_now());
+        let sig = a.key.sign(&decline_message(&a.registry_id, &id, &pk, &reason, t))?;
+        post(&format!("{}/api/certificates/decline", a.registry_url), &json!({ "request_id": id, "reason": reason, "signed": signed(pk, t, sig) }))
     }
 
     fn config(&self) -> Result<Option<Config>> {
@@ -223,7 +453,7 @@ impl Console {
     /// Everything the console screens show.
     pub fn state(&self) -> Result<Value> {
         let Some(c) = self.config()? else {
-            return Ok(json!({ "configured": false, "wallets": self.wallet_names(), "devnet_here": self.d.devnet_ledger().exists() }));
+            return Ok(json!({ "mode": "fund", "configured": false, "wallets": self.wallet_names(), "devnet_here": self.d.devnet_ledger().exists() }));
         };
         let ledger = Ledger::load(&self.d.ledger()).ok();
         let tip = ledger.as_ref().map(|l| l.tip());
@@ -244,6 +474,7 @@ impl Console {
             }
         };
         Ok(json!({
+            "mode": "fund",
             "configured": true,
             "network": c.network,
             "devnet": c.network == DEVNET,
@@ -468,7 +699,7 @@ impl Console {
         drop(job);
         let (d, shared) = (self.d.clone(), self.job.clone());
         std::thread::spawn(move || {
-            let me = Console { d, job: shared.clone() };
+            let me = Console { d, job: shared.clone(), authority: false };
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| me.run_prove(&c, &fund_id)));
             let mut j = shared.lock().unwrap_or_else(|e| e.into_inner());
             match outcome {
@@ -722,8 +953,21 @@ impl Console {
     /// One API request (the path after `/api/console/`).
     pub fn handle(&self, method: &str, path: &str, body: &str) -> Result<(u16, Value)> {
         let parse = |b: &str| -> Result<Value> { if b.trim().is_empty() { Ok(json!({})) } else { Ok(serde_json::from_str(b)?) } };
+        if self.authority {
+            return Ok(match (method, path) {
+                ("GET", "state") => (200, self.authority_state()?),
+                ("POST", "authority-setup") => (200, self.authority_setup(parse(body)?)?),
+                ("GET", "inbox") => (200, self.inbox()?),
+                ("POST", "check") => (200, self.check_request(parse(body)?)?),
+                ("POST", "issue") => (200, self.issue_request(parse(body)?)?),
+                ("POST", "decline") => (200, self.decline_request(parse(body)?)?),
+                _ => (404, json!({ "error": "not found" })),
+            });
+        }
         Ok(match (method, path) {
             ("GET", "state") => (200, self.state()?),
+            ("GET", "compliance") => (200, self.compliance()?),
+            ("POST", "certificate-request") => (200, self.request_certificate(parse(body)?)?),
             ("GET", "job") => (200, serde_json::to_value(self.job.lock().unwrap_or_else(|e| e.into_inner()).clone())?),
             ("POST", "setup") => (200, self.setup(serde_json::from_str(body)?)?),
             ("POST", "register") => (200, self.register(serde_json::from_str(body)?)?),
@@ -758,7 +1002,7 @@ fn header<'a>(rq: &'a tiny_http::Request, name: &'static str) -> Option<&'a str>
 }
 
 /// Serve the console on this machine only, until stopped.
-pub fn serve(d: DataDir, addr: &str, web: PathBuf, open: bool) -> Result<()> {
+pub fn serve(d: DataDir, addr: &str, web: PathBuf, open: bool, authority: bool) -> Result<()> {
     if !(addr.starts_with("127.0.0.1:") || addr.starts_with("localhost:") || addr.starts_with("[::1]:")) {
         bail!("the console holds the fund's keys, so it only listens on this machine (127.0.0.1:<port>)");
     }
@@ -773,7 +1017,7 @@ pub fn serve(d: DataDir, addr: &str, web: PathBuf, open: bool) -> Result<()> {
     let hosts = [format!("127.0.0.1:{port}"), format!("localhost:{port}"), format!("[::1]:{port}")];
     let origins: Vec<String> = hosts.iter().map(|h| format!("http://{h}")).collect();
     let url = format!("http://127.0.0.1:{port}/#token={token}");
-    println!("Fund console: {url}");
+    println!("{}: {url}", if authority { "Authority console" } else { "Fund console" });
     println!("Wallet and settings stay in {}. The link carries this run's access token; don't share it.", d.0.display());
     if !web.join("index.html").is_file() {
         eprintln!("warning: no web build at {} (npm --prefix web ci && npm --prefix web run build)", web.display());
@@ -782,7 +1026,7 @@ pub fn serve(d: DataDir, addr: &str, web: PathBuf, open: bool) -> Result<()> {
         let cmd = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
         let _ = std::process::Command::new(cmd).arg(&url).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
     }
-    let console = Console::new(d);
+    let console = if authority { Console::for_authority(d) } else { Console::new(d) };
     for mut rq in server.incoming_requests() {
         let method = rq.method().as_str().to_string();
         let url = rq.url().to_string();

@@ -1,4 +1,4 @@
-import type { Fund, Status } from '../types'
+import type { Check, Fund, Status } from '../types'
 
 export interface Step {
   label: string
@@ -41,12 +41,14 @@ export interface PendingRound {
 }
 
 export interface Unconfigured {
+  mode: 'fund'
   configured: false
   wallets: string[]
   devnet_here: boolean
 }
 
 export interface Configured {
+  mode: 'fund'
   configured: true
   network: string
   devnet: boolean
@@ -69,4 +71,106 @@ export interface Configured {
   job: Job
 }
 
-export type ConsoleState = Unconfigured | Configured
+export type ConsoleState = Unconfigured | Configured | AuthorityState
+
+/* ---- certificates: the fund's side and the authority's side ---- */
+
+export type Role = 'auditor' | 'regulator' | 'compliance' | 'registry'
+
+export interface Certificate {
+  version: string
+  id: string
+  kind: 'registry' | 'authority'
+  registry: string
+  issuer_name: string
+  issuer_role: Role
+  issuer_key: string
+  fund_id: string
+  fund_name: string
+  fund_key: string
+  round: number
+  threshold_zat: number
+  since_height: number
+  at_height: number
+  at_block_hash: string
+  statement_hash: string
+  checks_passed: number
+  checks_total: number
+  note: string
+  issued_at: string
+  signature: string
+}
+
+export interface CertRequest {
+  id: string
+  fund_id: string
+  authority_key: string
+  round: number
+  note: string
+  requested_at: string
+  status: 'pending' | 'issued' | 'declined'
+  reason: string | null
+  decided_at: string | null
+  certificate: Certificate | null
+}
+
+export interface Authority {
+  key: string
+  name: string
+  role: Role
+  approved_at: string
+}
+
+export interface Compliance {
+  fund_id: string
+  fund_name: string | null
+  unit: string
+  authorities: Authority[]
+  rounds: number[]
+  registry_certificates: Certificate[]
+  requests: { request: CertRequest; authority_name: string | null; authority_role: Role | null }[]
+}
+
+export interface AuthorityState {
+  mode: 'authority'
+  configured: boolean
+  name?: string
+  role?: Role
+  key?: string
+  approved?: boolean
+  network?: string
+  registry_url?: string
+  registry_id?: string
+  data_dir?: string
+  tip?: number | null
+  registry_error?: string | null
+}
+
+export interface InboxAttestation {
+  registry: string
+  fund_id: string
+  round: number
+  threshold_zat: number
+  since_height: number
+  at_height: number
+  at_block_hash: string
+}
+
+export interface InboxItem {
+  request: CertRequest
+  fund_name: string | null
+  fund_description: string | null
+  obligations_zat: number | null
+  link: string | null
+  attestation: InboxAttestation | null
+}
+
+export interface Inbox {
+  authority: Authority
+  requests: InboxItem[]
+}
+
+export interface CheckResult {
+  verdict: { ok: boolean; checks: Check[] }
+  ms: number
+}

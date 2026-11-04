@@ -22,7 +22,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::attest::{round_message, verify, Attestation, Verdict, VERSION};
-use crate::fundkey::{verify_sig, FundKey};
+use crate::compliance::{
+    check_certificate, check_fresh, check_name, check_role, decline_message, fund_read_message, inbox_message, issue, matches,
+    request_message, Authority, CertRequest, Certificate, DeclineBody, FundReadBody, IssuerKey, RequestBody, Signed,
+};
+use crate::fundkey::{check_key, verify_sig, FundKey};
 use crate::ledger::Ledger;
 use crate::store::{read_json, write_json, DataDir};
 use crate::util::{short, zec, MAX_MONEY};
@@ -38,6 +42,9 @@ pub struct StoredAttestation {
     pub received_at: String,
     pub attestation: Attestation,
     pub verdict: Verdict,
+    /// The registry's own certificate for this round. Private to the fund.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_certificate: Option<Certificate>,
 }
 
 /// What a fund publishes about itself. Signed by the fund key on every change.
@@ -130,7 +137,24 @@ pub struct Registry {
     /// key). None: anyone may register an unused id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowlist: Option<BTreeMap<String, String>>,
+    /// Auditors, regulators and compliance bodies the operator approved to
+    /// issue certificates, by public key.
+    #[serde(default)]
+    pub authorities: BTreeMap<String, Authority>,
+    /// Requests for certification, from funds to authorities.
+    #[serde(default)]
+    pub cert_requests: Vec<CertRequest>,
 }
+
+/// Body of `POST /api/certificates/issue`: a certificate signed by an approved authority.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct IssueBody {
+    pub request_id: String,
+    pub certificate: Certificate,
+}
+
+/// Most open requests a fund may have at once, so nobody fills an authority's inbox.
+const MAX_PENDING_PER_FUND: usize = 20;
 
 const MAX_ID: usize = 64;
 const MAX_NAME: usize = 120;
@@ -211,7 +235,15 @@ fn round_light(p: &Profile, a: &Attestation, obligations_zat: u64, unit: &str) -
 
 impl Registry {
     pub fn new(id: &str) -> Self {
-        Registry { id: id.into(), funds: BTreeMap::new(), nullifier_owner: BTreeMap::new(), events: vec![], allowlist: None }
+        Registry {
+            id: id.into(),
+            funds: BTreeMap::new(),
+            nullifier_owner: BTreeMap::new(),
+            events: vec![],
+            allowlist: None,
+            authorities: BTreeMap::new(),
+            cert_requests: vec![],
+        }
     }
     /// The registry state in `d`, which must be for registry `id`.
     pub fn load_or_new(d: &DataDir, id: &str) -> Result<Self> {
@@ -337,9 +369,193 @@ impl Registry {
             a.round, zec(a.threshold_zat), ledger.unit(), a.since_height, a.at_height
         );
         self.event(&fund_id, true, summary.clone());
-        self.funds.get_mut(&fund_id).unwrap().attestations.push(StoredAttestation { received_at: now(), attestation: a, verdict: v.clone() });
+        self.funds.get_mut(&fund_id).unwrap().attestations.push(StoredAttestation { received_at: now(), attestation: a, verdict: v.clone(), registry_certificate: None });
         Ok((true, summary, Some(v)))
     }
+
+    // -------------------------------------------------------------- certificates
+
+    /// Approve an authority to issue certificates (operator only, from the CLI).
+    pub fn approve_authority(&mut self, key: &str, name: &str, role: &str) -> Result<()> {
+        check_key(key)?;
+        check_name(name)?;
+        check_role(role)?;
+        self.authorities.insert(key.into(), Authority { key: key.into(), name: name.trim().into(), role: role.into(), approved_at: now() });
+        Ok(())
+    }
+
+    pub fn revoke_authority(&mut self, key: &str) -> Result<Authority> {
+        self.authorities.remove(key).ok_or_else(|| anyhow!("no approved authority with key {}", short(key)))
+    }
+
+    /// The registry's own certificate for a fund's latest round, issued once.
+    pub fn certify_latest(&mut self, fund_id: &str, key: &IssuerKey) -> Result<Certificate> {
+        let f = self.funds.get_mut(fund_id).ok_or_else(|| anyhow!("unknown fund {fund_id}"))?;
+        let name = f.profile.name.clone();
+        let s = f.attestations.last_mut().ok_or_else(|| anyhow!("{fund_id} has no rounds"))?;
+        if let Some(c) = &s.registry_certificate {
+            return Ok(c.clone());
+        }
+        let c = issue("registry", key, &s.attestation, &s.verdict, &name, "Verified by the registry when the round was published.")?;
+        s.registry_certificate = Some(c.clone());
+        Ok(c)
+    }
+
+    fn fund_signed(&self, fund_id: &str, s: &Signed, msg: &str) -> Result<&Fund> {
+        let f = self.funds.get(fund_id).ok_or_else(|| anyhow!("unknown fund {fund_id}"))?;
+        if s.key != f.key {
+            bail!("not signed by the key registered for {fund_id}");
+        }
+        check_fresh(s.time)?;
+        verify_sig(&f.key, msg, &s.signature).map_err(|_| anyhow!("signature invalid for {fund_id}"))?;
+        Ok(f)
+    }
+
+    fn authority_signed(&self, s: &Signed, msg: &str) -> Result<&Authority> {
+        let a = self.authorities.get(&s.key).ok_or_else(|| {
+            anyhow!("this authority isn't approved on registry {}: ask its operator to run `zsolv registry approve-authority --key {}`", self.id, s.key)
+        })?;
+        check_fresh(s.time)?;
+        verify_sig(&s.key, msg, &s.signature).map_err(|_| anyhow!("signature invalid for this authority"))?;
+        Ok(a)
+    }
+
+    /// A fund asks an approved authority to certify one of its published rounds.
+    pub fn request_certification(&mut self, b: RequestBody) -> Result<CertRequest> {
+        let msg = request_message(&self.id, &b.fund_id, &b.authority_key, b.round, &b.note, b.signed.time);
+        let f = self.fund_signed(&b.fund_id, &b.signed, &msg)?;
+        if !f.attestations.iter().any(|s| s.attestation.round == b.round) {
+            bail!("round {} isn't published on this registry", b.round);
+        }
+        if !self.authorities.contains_key(&b.authority_key) {
+            bail!("that authority isn't approved on this registry");
+        }
+        if b.note.len() > 500 {
+            bail!("keep the note under 500 characters");
+        }
+        let open: Vec<_> = self.cert_requests.iter().filter(|r| r.fund_id == b.fund_id && r.status == "pending").collect();
+        if open.iter().any(|r| r.authority_key == b.authority_key && r.round == b.round) {
+            bail!("round {} is already waiting for this authority", b.round);
+        }
+        if open.len() >= MAX_PENDING_PER_FUND {
+            bail!("{} requests are already open; wait for answers first", open.len());
+        }
+        let r = CertRequest {
+            id: new_link()[..16].to_string(),
+            fund_id: b.fund_id,
+            authority_key: b.authority_key,
+            round: b.round,
+            note: b.note.trim().into(),
+            requested_at: now(),
+            status: "pending".into(),
+            reason: None,
+            decided_at: None,
+            certificate: None,
+        };
+        self.cert_requests.push(r.clone());
+        Ok(r)
+    }
+
+    /// Everything certified for a fund, for the fund only.
+    pub fn fund_certificates(&self, b: &FundReadBody) -> Result<serde_json::Value> {
+        let f = self.fund_signed(&b.fund_id, &b.signed, &fund_read_message(&self.id, &b.fund_id, &b.signed.key, b.signed.time))?;
+        let registry_certificates: Vec<_> = f.attestations.iter().rev().filter_map(|s| s.registry_certificate.clone()).collect();
+        let requests: Vec<_> = self
+            .cert_requests
+            .iter()
+            .rev()
+            .filter(|r| r.fund_id == b.fund_id)
+            .map(|r| {
+                let a = self.authorities.get(&r.authority_key);
+                serde_json::json!({ "request": r, "authority_name": a.map(|a| a.name.clone()), "authority_role": a.map(|a| a.role.clone()) })
+            })
+            .collect();
+        Ok(serde_json::json!({ "registry_certificates": registry_certificates, "requests": requests }))
+    }
+
+    /// An authority's requests, newest first, with what it needs to check each one.
+    pub fn authority_inbox(&self, s: &Signed) -> Result<serde_json::Value> {
+        let a = self.authority_signed(s, &inbox_message(&self.id, &s.key, s.time))?;
+        let items: Vec<_> = self
+            .cert_requests
+            .iter()
+            .rev()
+            .filter(|r| r.authority_key == s.key)
+            .map(|r| {
+                let f = self.funds.get(&r.fund_id);
+                let st = f.and_then(|f| f.attestations.iter().find(|x| x.attestation.round == r.round));
+                serde_json::json!({
+                    "request": r,
+                    "fund_name": f.map(|f| f.profile.name.clone()),
+                    "fund_description": f.map(|f| f.profile.description.clone()),
+                    "obligations_zat": f.map(|f| f.profile.obligations.iter().fold(0u64, |t, o| t.saturating_add(o.zat))),
+                    "link": f.map(|f| f.link.clone()),
+                    "attestation": st.map(|x| &x.attestation),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "authority": a, "requests": items }))
+    }
+
+    /// Record a certificate an approved authority signed for a pending request.
+    pub fn issue_certificate(&mut self, b: IssueBody) -> Result<CertRequest> {
+        let c = &b.certificate;
+        let i = self.cert_requests.iter().position(|r| r.id == b.request_id).ok_or_else(|| anyhow!("no request {}", b.request_id))?;
+        let r = &self.cert_requests[i];
+        if r.status != "pending" {
+            bail!("request {} is already {}", r.id, r.status);
+        }
+        let auth = self.authorities.get(&r.authority_key).ok_or_else(|| anyhow!("that authority is no longer approved"))?;
+        if c.kind != "authority" || c.issuer_key != r.authority_key || c.issuer_name != auth.name || c.issuer_role != auth.role {
+            bail!("the certificate isn't from the authority this request was sent to");
+        }
+        check_certificate(c)?;
+        let f = self.funds.get(&r.fund_id).ok_or_else(|| anyhow!("unknown fund {}", r.fund_id))?;
+        let st = f.attestations.iter().find(|x| x.attestation.round == r.round).ok_or_else(|| anyhow!("round {} not found", r.round))?;
+        if !matches(c, &st.attestation) {
+            bail!("the certificate doesn't describe round {} of {}", r.round, r.fund_id);
+        }
+        if c.checks_passed != c.checks_total || c.checks_total == 0 {
+            bail!("a certificate needs every check to pass");
+        }
+        let r = &mut self.cert_requests[i];
+        r.status = "issued".into();
+        r.decided_at = Some(now());
+        r.certificate = Some(b.certificate);
+        Ok(r.clone())
+    }
+
+    /// An authority declines a request, with a reason the fund sees.
+    pub fn decline_certification(&mut self, b: DeclineBody) -> Result<CertRequest> {
+        let i = self.cert_requests.iter().position(|r| r.id == b.request_id).ok_or_else(|| anyhow!("no request {}", b.request_id))?;
+        if self.cert_requests[i].authority_key != b.signed.key {
+            bail!("this request was sent to another authority");
+        }
+        let msg = decline_message(&self.id, &b.request_id, &b.signed.key, &b.reason, b.signed.time);
+        self.authority_signed(&b.signed, &msg)?;
+        if b.reason.trim().is_empty() || b.reason.len() > 500 {
+            bail!("give a reason of up to 500 characters");
+        }
+        let r = &mut self.cert_requests[i];
+        if r.status != "pending" {
+            bail!("request {} is already {}", r.id, r.status);
+        }
+        r.status = "declined".into();
+        r.reason = Some(b.reason.trim().into());
+        r.decided_at = Some(now());
+        Ok(r.clone())
+    }
+}
+
+/// The registry's own certificate key, made on first use. Secret: lives next to registry.json.
+pub fn registry_key(d: &DataDir, reg_id: &str) -> Result<IssuerKey> {
+    let p = d.registry_key();
+    if p.exists() {
+        return read_json(&p);
+    }
+    let k = IssuerKey::generate(&format!("Z-Solvency registry {reg_id}"), "registry");
+    crate::store::write_secret_json(&p, &k)?;
+    Ok(k)
 }
 
 pub fn now() -> String {
@@ -530,7 +746,7 @@ fn handle(d: &DataDir, reg_id: &str, ledger: &Ledger, budget: Option<&mut Rebuil
         // Chain facts only: funds are unlisted, reachable by their share link.
         ("GET", ["api", "state"]) => {
             (200, json!({ "registry": reg.id, "network": ledger.network, "pool": ledger.pool, "unit": unit, "tip": tip,
-                          "tip_hash": ledger.block(tip)?.hash }))
+                          "tip_hash": ledger.block(tip)?.hash, "registry_key": registry_key(d, reg_id)?.public()? }))
         }
         ("GET", ["api", "links", link]) => match reg.by_link(link) {
             Some(f) => (200, serde_json::to_value(fund_view(f, ledger, &reg.events))?),
@@ -585,9 +801,37 @@ fn handle(d: &DataDir, reg_id: &str, ledger: &Ledger, budget: Option<&mut Rebuil
                     }
                 }
             }
+            let fund_id = a.fund_id.clone();
             let (accepted, reason, verdict) = reg.submit(a, ledger)?;
+            // Every accepted round gets the registry's own certificate, kept for the fund only.
+            let certificate = if accepted { Some(reg.certify_latest(&fund_id, &registry_key(d, reg_id)?)?) } else { None };
             reg.save(d)?;
-            (if accepted { 200 } else { 422 }, json!({"accepted": accepted, "reason": reason, "verdict": verdict}))
+            (if accepted { 200 } else { 422 }, json!({"accepted": accepted, "reason": reason, "verdict": verdict, "certificate": certificate}))
+        }
+        // Approved authorities are public: a fund picks one to ask.
+        ("GET", ["api", "authorities"]) => (200, serde_json::to_value(reg.authorities.values().collect::<Vec<_>>())?),
+        ("POST", ["api", "certificates", "request"]) => {
+            let r = reg.request_certification(serde_json::from_str(body).map_err(|e| anyhow!("bad request: {e}"))?)?;
+            reg.save(d)?;
+            (200, serde_json::to_value(r)?)
+        }
+        ("POST", ["api", "certificates", "fund"]) => {
+            let b: FundReadBody = serde_json::from_str(body).map_err(|e| anyhow!("bad request: {e}"))?;
+            (200, reg.fund_certificates(&b)?)
+        }
+        ("POST", ["api", "certificates", "inbox"]) => {
+            let s: Signed = serde_json::from_str(body).map_err(|e| anyhow!("bad request: {e}"))?;
+            (200, reg.authority_inbox(&s)?)
+        }
+        ("POST", ["api", "certificates", "issue"]) => {
+            let r = reg.issue_certificate(serde_json::from_str(body).map_err(|e| anyhow!("bad certificate: {e}"))?)?;
+            reg.save(d)?;
+            (200, serde_json::to_value(r)?)
+        }
+        ("POST", ["api", "certificates", "decline"]) => {
+            let r = reg.decline_certification(serde_json::from_str(body).map_err(|e| anyhow!("bad request: {e}"))?)?;
+            reg.save(d)?;
+            (200, serde_json::to_value(r)?)
         }
         _ => (404, json!({"error": "not found"})),
     })
@@ -719,6 +963,8 @@ pub fn serve(d: DataDir, reg_id: String, addr: &str, web: PathBuf, limit: RateLi
     if reg.ensure_links() {
         reg.save(&d)?;
     }
+    // Make the certificate key now, before requests race to create it.
+    registry_key(&d, &reg_id)?;
     let server = tiny_http::Server::http(addr).map_err(|e| anyhow!("{e}"))?;
     eprintln!(
         "Z-Solvency registry {reg_id} on http://{addr} (POSTs: {} per minute per client; new-height root rebuilds: {} per hour)",

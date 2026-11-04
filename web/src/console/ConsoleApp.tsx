@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useRoute } from '../hooks'
 import { ConsoleError, consoleApi, takeToken } from './api'
+import { AuthorityApp } from './AuthorityApp'
+import { Compliance } from './Compliance'
 import { History } from './History'
 import { Prove } from './Prove'
 import { Register } from './Register'
 import { Reserve } from './Reserve'
-import { Setup } from './Setup'
-import type { Configured, ConsoleState } from './types'
+import { BackupWords, Setup } from './Setup'
+import type { AuthorityState, Configured, ConsoleState } from './types'
 import { Wallet } from './Wallet'
 
 const SCREENS = [
@@ -14,6 +16,7 @@ const SCREENS = [
   ['/reserve', 'Reserve'],
   ['/prove', 'Prove and publish'],
   ['/history', 'History'],
+  ['/compliance', 'Compliance'],
   ['/wallet', 'Wallet'],
 ] as const
 
@@ -50,11 +53,13 @@ export function ConsoleApp() {
   const route = useRoute()
   const { state, error, reload } = useConsoleState(token != null)
   const known = SCREENS.some(([path]) => path === route)
+  // New backup words stay on screen until the treasurer confirms, whatever the polled state says.
+  const [backup, setBackup] = useState<string | null>(null)
 
   // Name the screen in the address bar, so it stays put while its own state changes.
   useEffect(() => {
-    if (state?.configured && !known) window.location.replace(`#${nextStep(state)}`)
-  }, [state, known])
+    if (state?.mode === 'fund' && state.configured && !known && !backup) window.location.replace(`#${nextStep(state)}`)
+  }, [state, known, backup])
 
   if (!token || (error instanceof ConsoleError && error.status === 401)) {
     return (
@@ -69,6 +74,19 @@ export function ConsoleApp() {
       </Shell>
     )
   }
+  if (backup) {
+    return (
+      <Shell>
+        <BackupWords
+          words={backup}
+          onContinue={() => {
+            setBackup(null)
+            void reload()
+          }}
+        />
+      </Shell>
+    )
+  }
   if (!state) {
     return (
       <Shell>
@@ -78,10 +96,17 @@ export function ConsoleApp() {
       </Shell>
     )
   }
+  if (state.mode === 'authority') {
+    return (
+      <Shell authority={state}>
+        <AuthorityApp state={state} reload={reload} />
+      </Shell>
+    )
+  }
   if (!state.configured) {
     return (
       <Shell>
-        <Setup state={state} onDone={reload} />
+        <Setup state={state} onDone={reload} onWords={setBackup} />
       </Shell>
     )
   }
@@ -97,12 +122,13 @@ export function ConsoleApp() {
       {current === '/reserve' && <Reserve state={state} reload={reload} />}
       {current === '/prove' && <Prove state={state} reload={reload} />}
       {current === '/history' && <History state={state} />}
+      {current === '/compliance' && <Compliance state={state} />}
       {current === '/wallet' && <Wallet state={state} reload={reload} />}
     </Shell>
   )
 }
 
-function Shell({ state, current, children }: { state?: Configured; current?: string; children: React.ReactNode }) {
+function Shell({ state, authority, current, children }: { state?: Configured; authority?: AuthorityState; current?: string; children: React.ReactNode }) {
   return (
     <>
       <header className="topbar">
@@ -110,8 +136,13 @@ function Shell({ state, current, children }: { state?: Configured; current?: str
           <span className="word">Z-Solvency</span>
           <span className="tm">ZEC</span>
         </span>
-        <span className="tagline">Fund console</span>
+        <span className="tagline">{authority ? 'Authority console' : 'Fund console'}</span>
         <span className="tag local">Console · local</span>
+        {authority?.configured && (
+          <span className="chain">
+            {authority.network} · tip block {authority.tip ?? '…'} · {authority.registry_url?.replace(/^https?:\/\//, '')}
+          </span>
+        )}
         {state && (
           <span className="chain">
             {state.network} · tip block {state.tip ?? '…'} · {state.registry_url.replace(/^https?:\/\//, '')}

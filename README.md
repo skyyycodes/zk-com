@@ -135,6 +135,17 @@ Load limits:
 - Root rebuilds at new heights, 10 to 20 s each on testnet, are limited across all clients (`--rebuilds-per-hour`, default 12).
 - Keep the registry behind the proxy: Caddy reads each request whole before passing it on.
 
+### Auditors and regulators
+
+A company can hand its auditor or regulator a signed certificate for a round, without showing its books.
+
+- **The registry certifies every round it accepts**, under its own key (`registry_key` in `/api/state`).
+- **Approved authorities certify on request.** An auditor, regulator or compliance body creates a key (`zsolv authority new`, or `zsolv console --authority`), and the registry operator approves it (`zsolv registry approve-authority`). A company asks it to certify a published round from the console's Compliance tab. The authority re-verifies the proof on its own machine against its own chain data, then signs a certificate or declines with a reason.
+- **Certificates are private to the company.** They never appear on the link page; the company reads them with a request signed by its fund key, and downloads them or saves them as a PDF.
+- **Anyone can check one:** `zsolv certificate verify cert.json --url <registry>` checks the signature, that no field changed, and that the issuer is that registry or one of its approved authorities.
+
+A certificate says that the round's proof verified. Like the proof, it reveals no balance, notes, addresses or history.
+
 ### CLI
 
 ```
@@ -151,7 +162,12 @@ zsolv fund --wallet <w> --id <id> --name <name> --obligation "label=ZEC" [--min-
 zsolv console [--addr 127.0.0.1:7070] [--no-open]  # the fund console, on this machine only
 zsolv submit <attestation.json> [--url URL]
 zsolv serve [--addr 127.0.0.1:8080] [--web web/dist] [--rate-limit N] [--rebuilds-per-hour N] [--trust-proxy]
-zsolv registry allow --id <id> --key <public key> | open   # close registration to listed funds, or reopen it
+zsolv registry allow --id <id> --key <public key> | open   # close registration
+zsolv registry approve-authority --key <public key> --name <name> --role auditor|regulator|compliance
+zsolv registry revoke-authority --key <public key> | authorities
+zsolv authority new --name <name> --role auditor [--url URL] | show
+zsolv certificate verify <certificate.json> [--url URL]
+zsolv console --authority                           # the auditor's or regulator's console to listed funds, or reopen it
 ```
 
 ### API
@@ -165,6 +181,12 @@ zsolv registry allow --id <id> --key <public key> | open   # close registration 
 | POST | `/api/links/:link/verify` | Re-verify the latest attestation now |
 | POST | `/api/funds` | Register or update a fund profile, signed by the fund key; returns the fund's `link` |
 | POST | `/api/attest` | Submit an attestation, signed by the fund key |
+| GET | `/api/authorities` | Approved auditors, regulators and compliance bodies |
+| POST | `/api/certificates/request` | A fund asks an authority to certify a round, signed by the fund key |
+| POST | `/api/certificates/fund` | A fund's certificates and requests, signed by the fund key |
+| POST | `/api/certificates/inbox` | An authority's requests, signed by its key |
+| POST | `/api/certificates/issue` | An authority's signed certificate for a pending request |
+| POST | `/api/certificates/decline` | An authority declines a request, with a reason |
 | GET | `/api/roots/:height` | Tree and nullifier-IMT roots at a height this registry has computed |
 
 ## Built on

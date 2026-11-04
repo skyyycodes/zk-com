@@ -152,6 +152,21 @@ enum Cmd {
         /// Don't open a browser.
         #[arg(long)]
         no_open: bool,
+        /// Run the console for an auditor, regulator or compliance body: review
+        /// certification requests and issue certificates.
+        #[arg(long)]
+        authority: bool,
+    },
+    /// Auditors, regulators and compliance bodies: their signing key.
+    Authority {
+        #[command(subcommand)]
+        cmd: AuthorityCmd,
+    },
+    /// Check a certificate file: its signature, and (with --url) that its issuer
+    /// is that registry or one of its approved authorities.
+    Certificate {
+        #[command(subcommand)]
+        cmd: CertificateCmd,
     },
     /// Submit an attestation to a registry server.
     Submit {
@@ -238,6 +253,57 @@ enum RegistryCmd {
     Open {
         #[arg(long, default_value = DEFAULT_REGISTRY, env = "ZSOLV_REGISTRY")]
         registry: String,
+    },
+    /// Approve an auditor, regulator or compliance body to issue certificates.
+    ApproveAuthority {
+        /// The authority's public key (`zsolv authority new` prints it).
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        name: String,
+        /// auditor, regulator or compliance.
+        #[arg(long, default_value = "auditor")]
+        role: String,
+        #[arg(long, default_value = DEFAULT_REGISTRY, env = "ZSOLV_REGISTRY")]
+        registry: String,
+    },
+    /// Stop accepting certificates from an authority.
+    RevokeAuthority {
+        #[arg(long)]
+        key: String,
+        #[arg(long, default_value = DEFAULT_REGISTRY, env = "ZSOLV_REGISTRY")]
+        registry: String,
+    },
+    /// List the approved authorities.
+    Authorities {
+        #[arg(long, default_value = DEFAULT_REGISTRY, env = "ZSOLV_REGISTRY")]
+        registry: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuthorityCmd {
+    /// Create this authority's signing key in the data directory and print its public key.
+    New {
+        #[arg(long)]
+        name: String,
+        /// auditor, regulator or compliance.
+        #[arg(long, default_value = "auditor")]
+        role: String,
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        url: String,
+    },
+    /// Show this authority's name, role and public key.
+    Show,
+}
+
+#[derive(Subcommand)]
+enum CertificateCmd {
+    Verify {
+        file: PathBuf,
+        /// The registry to check the issuer against.
+        #[arg(long)]
+        url: Option<String>,
     },
 }
 
@@ -345,6 +411,67 @@ fn run() -> Result<()> {
                 reg.allowlist = None;
                 reg.save(&d)?;
                 println!("registry {registry}: anyone may register an unused fund id");
+            }
+            RegistryCmd::ApproveAuthority { key, name, role, registry } => {
+                let mut reg = Registry::load_or_new(&d, &registry)?;
+                reg.approve_authority(&key, &name, &role)?;
+                reg.save(&d)?;
+                println!("registry {registry}: {name} ({role}) may now issue certificates");
+            }
+            RegistryCmd::RevokeAuthority { key, registry } => {
+                let mut reg = Registry::load_or_new(&d, &registry)?;
+                let a = reg.revoke_authority(&key)?;
+                reg.save(&d)?;
+                println!("registry {registry}: {} ({}) may no longer issue certificates", a.name, a.role);
+            }
+            RegistryCmd::Authorities { registry } => {
+                let reg = Registry::load_or_new(&d, &registry)?;
+                if reg.authorities.is_empty() {
+                    println!("no approved authorities on {registry}");
+                }
+                for a in reg.authorities.values() {
+                    println!("{}  {} ({})", a.key, a.name, a.role);
+                }
+            }
+        },
+        Cmd::Authority { cmd } => match cmd {
+            AuthorityCmd::New { name, role, url } => {
+                let a = zsolv::console::create_authority(&d, &name, &role, &url)?;
+                println!("authority key for {name} ({role}) in {}", d.authority().display());
+                println!("public key {}", a.key.public()?);
+                println!("ask the registry operator to run: zsolv registry approve-authority --key {} --name \"{name}\" --role {role}", a.key.public()?);
+            }
+            AuthorityCmd::Show => {
+                let a: zsolv::console::AuthorityConfig = zsolv::store::read_json(&d.authority())?;
+                println!("{} ({}) on registry {} at {}", a.key.name, a.key.role, a.registry_id, a.registry_url);
+                println!("public key {}", a.key.public()?);
+            }
+        },
+        Cmd::Certificate { cmd } => match cmd {
+            CertificateCmd::Verify { file, url } => {
+                let c: zsolv::compliance::Certificate = zsolv::store::read_json(&file)?;
+                zsolv::compliance::check_certificate(&c)?;
+                println!("✔ signature valid: issued by {} ({}), key {}", c.issuer_name, c.issuer_role, c.issuer_key);
+                println!("  {}", zsolv::compliance::summary(&c, "ZEC"));
+                println!("  {} of {} checks passed, statement hash {}", c.checks_passed, c.checks_total, c.statement_hash);
+                if !c.note.is_empty() {
+                    println!("  note: {}", c.note);
+                }
+                if let Some(url) = url {
+                    let url = url.trim_end_matches('/');
+                    let trusted = if c.kind == "registry" {
+                        let st: serde_json::Value = serde_json::from_str(&ureq::get(&format!("{url}/api/state")).call()?.into_string()?)?;
+                        st["registry"].as_str() == Some(c.registry.as_str()) && st["registry_key"].as_str() == Some(c.issuer_key.as_str())
+                    } else {
+                        let list: serde_json::Value = serde_json::from_str(&ureq::get(&format!("{url}/api/authorities")).call()?.into_string()?)?;
+                        list.as_array().is_some_and(|l| l.iter().any(|a| a["key"].as_str() == Some(c.issuer_key.as_str())))
+                    };
+                    if trusted {
+                        println!("✔ issuer is {} on the registry at {url}", if c.kind == "registry" { "the registry itself" } else { "an approved authority" });
+                    } else {
+                        bail!("issuer is not {} on the registry at {url}", if c.kind == "registry" { "that registry" } else { "approved" });
+                    }
+                }
             }
         },
         Cmd::Wallet { cmd } => match cmd {
@@ -519,7 +646,7 @@ fn run() -> Result<()> {
             }
             println!("{} {}", if code == 200 { "ACCEPTED:" } else { "REFUSED:" }, v["reason"].as_str().unwrap_or(""));
         }
-        Cmd::Console { addr, web, no_open } => zsolv::console::serve(d, &addr, web, !no_open)?,
+        Cmd::Console { addr, web, no_open, authority } => zsolv::console::serve(d, &addr, web, !no_open, authority)?,
         Cmd::Serve { addr, registry, web, rate_limit, rebuilds_per_hour, trust_proxy } => {
             zsolv::registry::serve(d, registry, &addr, web, zsolv::registry::RateLimit { per_minute: rate_limit, rebuilds_per_hour, trust_proxy })?
         }

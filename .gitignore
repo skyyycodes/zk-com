@@ -7,3 +7,6 @@
 /data-testnet
 /attestations-testnet
 /snapshots
+/data-live
+.env
+/recordings

@@ -1,4 +1,5 @@
 pub mod attest;
+pub mod compliance;
 pub mod console;
 pub mod fundkey;
 pub mod imt;

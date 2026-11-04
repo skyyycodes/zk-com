@@ -103,7 +103,7 @@ export function Prove({ state, reload }: { state: Configured; reload: () => void
             <li>
               Balance: {zec(wallet.balance_zat)} {unit}
             </li>
-            <li>Which notes, donors, memos</li>
+            <li>Which notes, counterparties, memos</li>
             <li>Spending key</li>
           </ul>
         </div>
@@ -135,7 +135,7 @@ export function Prove({ state, reload }: { state: Configured; reload: () => void
         <div className="share-card" role="status">
           <p>
             Published round {result.round}. Your fund is {result.status === 'green' ? 'green' : result.status === 'amber' ? 'amber for now' : 'updated'}.
-            Share this link with your donors and members; anyone with it can check the proof. It stays the same every
+            Share this link with your auditors, clients and counterparties; anyone with it can check the proof. It stays the same every
             round.
           </p>
           {result.page_url ? (

@@ -103,13 +103,17 @@ export function Register({ state, reload }: { state: Configured; reload: () => v
       <div className="split">
         <div className="form-col">
           <Field label="Fund name" error={errors.name} id="reg-name">
-            {(p) => <input {...p} required autoComplete="off" value={name} onChange={(e) => setName(e.target.value)} placeholder="Mill Workers' Strike Fund" />}
+            {(p) => <input {...p} required autoComplete="off" value={name} onChange={(e) => setName(e.target.value)} placeholder="Northwind Custody" />}
           </Field>
           <Field
-            label="Page address"
+            label="Fund id"
             id="reg-id"
             error={errors.id}
-            hint={registered ? 'Fixed once registered.' : <span className="mono">{state.registry_url.replace(/^https?:\/\//, '')}/#/fund/{pageId || '…'}</span>}
+            hint={
+              registered
+                ? 'Fixed once registered.'
+                : 'Not public: your page is reached only through the link you get after saving. Saving again with the same id returns the same link.'
+            }
           >
             {(p) => (
               <input
@@ -128,7 +132,7 @@ export function Register({ state, reload }: { state: Configured; reload: () => v
             )}
           </Field>
           <Field label="What it's for">
-            {(p) => <textarea {...p} rows={2} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Strike pay for 120 workers at the Halden mill." />}
+            {(p) => <textarea {...p} rows={2} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Shielded ZEC held for institutional clients." />}
           </Field>
 
           <fieldset>
@@ -136,7 +140,7 @@ export function Register({ state, reload }: { state: Configured; reload: () => v
             {rows.map((r, i) => (
               <div className="obligation" key={i}>
                 <Field label={`Obligation ${i + 1}`} error={errors[`label${i}`]} id={`reg-label${i}`}>
-                  {(p) => <input {...p} autoComplete="off" value={r.label} onChange={(e) => setRow(i, { label: e.target.value })} placeholder="Strike pay: 120 × 1 ZEC × 4 weeks" />}
+                  {(p) => <input {...p} autoComplete="off" value={r.label} onChange={(e) => setRow(i, { label: e.target.value })} placeholder="Client balances" />}
                 </Field>
                 <Field label={state.unit} error={errors[`amount${i}`]} id={`reg-amount${i}`}>
                   {(p) => <input {...p} type="text" inputMode="decimal" autoComplete="off" value={r.amount} onChange={(e) => setRow(i, { amount: e.target.value })} placeholder="480" />}

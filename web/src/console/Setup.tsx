@@ -7,7 +7,8 @@ type Mode = 'create' | 'import' | 'existing'
 type Network = 'devnet' | 'testnet'
 const LOCAL_REGISTRY = 'http://127.0.0.1:8080'
 
-export function Setup({ state, onDone }: { state: Unconfigured; onDone: () => void }) {
+/** `onWords` hands new backup words up to the app, which keeps them on screen until Continue (state polling would otherwise replace this screen). */
+export function Setup({ state, onDone, onWords }: { state: Unconfigured; onDone: () => void; onWords: (words: string) => void }) {
   const [mode, setMode] = useState<Mode>('create')
   const [network, setNetwork] = useState<Network>(state.devnet_here ? 'devnet' : 'testnet')
   const [registry, setRegistry] = useState(state.devnet_here ? LOCAL_REGISTRY : '')
@@ -17,9 +18,6 @@ export function Setup({ state, onDone }: { state: Unconfigured; onDone: () => vo
   const [birthday, setBirthday] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [backup, setBackup] = useState<string | null>(null)
-
-  if (backup) return <BackupWords words={backup} onContinue={onDone} />
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -34,7 +32,7 @@ export function Setup({ state, onDone }: { state: Unconfigured; onDone: () => vo
         words: mode === 'import' ? words : undefined,
         birthday: mode === 'import' && birthday.trim() ? Number(birthday) : undefined,
       })
-      if (r.words) setBackup(r.words)
+      if (r.words) onWords(r.words)
       else onDone()
     } catch (err) {
       setError(message(err))
@@ -164,7 +162,7 @@ function Option({ checked, onChange, title, children }: { checked: boolean; onCh
   )
 }
 
-function BackupWords({ words, onContinue }: { words: string; onContinue: () => void }) {
+export function BackupWords({ words, onContinue }: { words: string; onContinue: () => void }) {
   const [saved, setSaved] = useState(false)
   return (
     <section className="card form">

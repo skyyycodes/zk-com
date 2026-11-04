@@ -47,7 +47,7 @@ export function ContrastPanel({ fund, link }: { fund: Fund; link: string }) {
                   </tbody>
                 </table>
               </div>
-              <p className="warn">Permanent and exact. Every donor, recipient, memo and date, for anyone, forever.</p>
+              <p className="warn">Permanent and exact. Every counterparty, amount, memo and date, past and future, for anyone who has it.</p>
             </>
           )}
         </div>
@@ -59,7 +59,7 @@ export function ContrastPanel({ fund, link }: { fund: Fund; link: string }) {
               : '—'}
           </div>
           <p className="muted small">
-            Not the balance, the notes, addresses, history, memos, donors or recipients. A new proof each round; nothing
+            Not the balance, the notes, addresses, history, memos or counterparties. A new proof each round; nothing
             permanent to take back.
           </p>
         </div>

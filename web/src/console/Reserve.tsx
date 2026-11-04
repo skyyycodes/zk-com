@@ -51,7 +51,7 @@ export function Reserve({ state, reload }: { state: Configured; reload: () => vo
     <section className="card">
       <h1>Lock the reserve</h1>
       <div className="tiles">
-        <Tile label="Operating money" value={`${zec(wallet.operating_zat)} ${unit}`} sub="Pays strike pay and costs" />
+        <Tile label="Operating money" value={`${zec(wallet.operating_zat)} ${unit}`} sub="Pays day-to-day withdrawals" />
         <Tile label="Reserve" value={live ? `${zec(live.value_zat)} ${unit}` : 'None yet'} sub={live ? `since block ${live.height}` : 'One note of exactly T'} />
       </div>
 

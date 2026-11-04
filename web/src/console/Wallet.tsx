@@ -123,12 +123,12 @@ function DevnetTools({ unit, reload }: { unit: string; reload: () => void }) {
     <section className="card">
       <h2 className="eyebrow">Devnet tools</h2>
       <div className="tool-grid">
-        <MoveForm title="Receive a test donation" action="Receive" labelName="From" defaultLabel="anonymous donor" unit={unit} onSubmit={after(consoleApi.receive)} />
+        <MoveForm title="Receive a test deposit" action="Receive" labelName="From" defaultLabel="a client" unit={unit} onSubmit={after(consoleApi.receive)} />
         <MoveForm
           title="Pay from operating money"
           action="Pay"
           labelName="To"
-          defaultLabel="members"
+          defaultLabel="a client withdrawal"
           unit={unit}
           hint="Refused if it would touch the reserve note."
           onSubmit={after(consoleApi.pay)}

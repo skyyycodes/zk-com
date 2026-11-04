@@ -62,6 +62,14 @@ impl DataDir {
     pub fn registry(&self) -> PathBuf {
         self.0.join("registry/registry.json")
     }
+    /// The registry's own certificate signing key. Secret.
+    pub fn registry_key(&self) -> PathBuf {
+        self.0.join("registry/registry-key.json")
+    }
+    /// An auditor's or regulator's console settings and signing key. Secret.
+    pub fn authority(&self) -> PathBuf {
+        self.0.join("authority.json")
+    }
     pub fn public(&self) -> PathBuf {
         self.0.join("public")
     }
