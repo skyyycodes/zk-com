@@ -20,13 +20,13 @@ export function ContrastPanel({ fund }: { fund: Fund }) {
       <h2 className="eyebrow">What a viewing key would have leaked</h2>
       <div className="contrast">
         <div className="leak">
-          <h4>If the fund published its viewing key</h4>
+          <h3>If the fund published its viewing key</h3>
           {vk === undefined && <p className="muted">Loading…</p>}
           {vk === null && <p className="muted">No demo export for this fund.</p>}
           {vk && (
             <>
               <div className="balance">Exact balance: {zec(vk.balance_zat)} {fund.unit}</div>
-              <div className="scroll">
+              <div className="scroll" tabIndex={0} role="region" aria-label="Viewing key history">
                 <table>
                   <tbody>
                     {[...vk.history].reverse().map((h, i) => (
@@ -52,7 +52,7 @@ export function ContrastPanel({ fund }: { fund: Fund }) {
           )}
         </div>
         <div className="safe">
-          <h4>What Z-Solvency publishes</h4>
+          <h3>What Z-Solvency publishes</h3>
           <div className="line">
             {latest
               ? `≥ ${zec(latest.threshold_zat)} ${fund.unit} · held since block ${latest.since_height} · checked at block ${latest.at_height} · signed by the fund`

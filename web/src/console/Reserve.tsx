@@ -20,7 +20,7 @@ export function Reserve({ state, reload }: { state: Configured; reload: () => vo
       <section className="card">
         <h1>Lock the reserve</h1>
         <p className="desc">
-          Register the fund first: the reserve covers its obligations. <a href="#/register">Register →</a>
+          Register the fund first: the reserve covers its obligations. <a href="#/register">Register</a>
         </p>
       </section>
     )
@@ -57,7 +57,7 @@ export function Reserve({ state, reload }: { state: Configured; reload: () => vo
 
       {obligations === 0 ? (
         <p className="spaced">
-          Add the fund's obligations first. <a href="#/register">Edit the fund page →</a>
+          Add the fund's obligations first. <a href="#/register">Edit the fund page</a>
         </p>
       ) : kept ? (
         <div className="after">
@@ -78,7 +78,7 @@ export function Reserve({ state, reload }: { state: Configured; reload: () => vo
             </>
           )}
           <a className="next" href="#/prove">
-            Next: prove and publish →
+            Next: prove and publish
           </a>
         </div>
       ) : (

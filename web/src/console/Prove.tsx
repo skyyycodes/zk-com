@@ -61,11 +61,11 @@ export function Prove({ state, reload }: { state: Configured; reload: () => void
         <p className="desc">
           {!state.fund ? (
             <>
-              Register the fund first. <a href="#/register">Register →</a>
+              Register the fund first. <a href="#/register">Register</a>
             </>
           ) : (
             <>
-              Lock the reserve first. <a href="#/reserve">Lock the reserve →</a>
+              Lock the reserve first. <a href="#/reserve">Lock the reserve</a>
             </>
           )}
         </p>

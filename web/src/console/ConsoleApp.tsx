@@ -107,7 +107,7 @@ function Shell({ state, current, children }: { state?: Configured; current?: str
     <>
       <header className="topbar">
         <span className="logo">
-          Z<span>-</span>Solvency
+          <span className="mark" aria-hidden="true" />Z<span>-</span>Solvency
         </span>
         <span className="tagline">Fund console</span>
         <span className="tag local">Console · local</span>

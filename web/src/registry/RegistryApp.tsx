@@ -1,6 +1,7 @@
 import { FundPage } from '../components/FundPage'
 import { Header } from '../components/Header'
 import { Home } from '../components/Home'
+import { Landing } from '../components/Landing'
 import { ListFund } from '../components/ListFund'
 import { useRegistry, useRoute } from '../hooks'
 
@@ -9,15 +10,27 @@ export function RegistryApp() {
   const route = useRoute()
   const fundId = route.match(/^\/fund\/(.+)$/)?.[1]
 
+  // The landing page explains the idea on its own, so it renders before the registry answers.
+  if (route === '/') {
+    return (
+      <>
+        <Header state={state} error={error} route={route} />
+        <main>
+          <Landing state={state} />
+        </main>
+      </>
+    )
+  }
+
   let body
-  if (!state) {
+  if (route === '/list') {
+    body = <ListFund />
+  } else if (!state) {
     body = (
       <div className="empty" role="status">
         {error ? `Can't reach the registry (${error}). Trying again every few seconds.` : 'Loading registry…'}
       </div>
     )
-  } else if (route === '/list') {
-    body = <ListFund />
   } else if (fundId) {
     const fund = state.funds.find((f) => f.id === decodeURIComponent(fundId))
     body = fund ? (
@@ -25,7 +38,7 @@ export function RegistryApp() {
       <FundPage key={fund.id} fund={fund} />
     ) : (
       <div className="empty">
-        No fund called “{decodeURIComponent(fundId)}” in this registry. <a href="#/">See all funds</a>
+        No fund called “{decodeURIComponent(fundId)}” in this registry. <a href="#/funds">See all funds</a>
       </div>
     )
   } else {
@@ -34,7 +47,7 @@ export function RegistryApp() {
 
   return (
     <>
-      <Header state={state} error={error} />
+      <Header state={state} error={error} route={route} />
       <main className="page">{body}</main>
     </>
   )

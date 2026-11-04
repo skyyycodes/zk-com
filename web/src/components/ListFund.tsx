@@ -3,7 +3,7 @@ export function ListFund() {
   return (
     <>
       <a className="back" href="#/">
-        ← All funds
+        ← Home
       </a>
       <section className="card prose">
         <h1>List your fund</h1>

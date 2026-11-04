@@ -16,7 +16,7 @@ export function Home({ state }: { state: RegistryState }) {
         <h1>Funds proving their reserves</h1>
         <p className="desc">
           Each fund proves it holds what it promised, and nobody learns who gave or who got. Open a fund to check its
-          proof yourself.
+          proof yourself. <a href="#/">How it works</a>
         </p>
       </section>
       <section className="card">
@@ -47,7 +47,7 @@ export function Home({ state }: { state: RegistryState }) {
           </ul>
         )}
         <a className="more" href="#/list">
-          Run a fund? List it here →
+          Run a fund? List it here
         </a>
       </section>
       <section className="card">

@@ -9,7 +9,7 @@ export function History({ state }: { state: Configured }) {
       <h1>Past rounds</h1>
       {state.pending.length === 0 && past.length === 0 ? (
         <p className="desc">
-          No rounds yet. Your first proof shows up here. <a href="#/prove">Prove and publish →</a>
+          No rounds yet. Your first proof shows up here. <a href="#/prove">Prove and publish</a>
         </p>
       ) : (
         <table>

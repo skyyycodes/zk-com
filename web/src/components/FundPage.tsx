@@ -9,7 +9,7 @@ export function FundPage({ fund }: { fund: Fund }) {
   const latest = fund.latest
   return (
     <>
-      <a className="back" href="#/">
+      <a className="back" href="#/funds">
         ← All funds
       </a>
       <section className="card">
@@ -102,7 +102,8 @@ function Obligations({ fund }: { fund: Fund }) {
   const covered = latest != null && latest.threshold_zat >= fund.obligations_zat
   return (
     <section className="card">
-      <h2 className="eyebrow">Solvency: reserve vs. published obligations</h2>
+      <h2 className="eyebrow">Solvency: reserve against published obligations</h2>
+      {latest && fund.obligations_zat > 0 && <Coverage reserve={latest.threshold_zat} owed={fund.obligations_zat} unit={fund.unit} />}
       <table>
         <thead>
           <tr>
@@ -132,5 +133,24 @@ function Obligations({ fund }: { fund: Fund }) {
         </tbody>
       </table>
     </section>
+  )
+}
+
+/** The proven reserve drawn against what the fund says it owes. */
+function Coverage({ reserve, owed, unit }: { reserve: number; owed: number; unit: string }) {
+  const scale = Math.max(reserve, owed)
+  const covered = reserve >= owed
+  return (
+    <div className="coverage">
+      <div className="coverage-track" aria-hidden="true">
+        <span className={`coverage-fill ${covered ? 'good' : 'short'}`} style={{ width: `${(reserve / scale) * 100}%` }} />
+        <span className="coverage-mark" style={{ left: `${(owed / scale) * 100}%` }} />
+      </div>
+      <p className="small">
+        {covered
+          ? `Proven reserve covers the obligations${reserve > owed ? `, with ${zec(reserve - owed)} ${unit} to spare` : ' exactly'}.`
+          : `Proven reserve is ${zec(owed - reserve)} ${unit} short of the obligations.`}
+      </p>
+    </div>
   )
 }

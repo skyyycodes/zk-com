@@ -210,7 +210,7 @@ export function Register({ state, reload }: { state: Configured; reload: () => v
         <p className="success" role="status">
           Published. Your page: <a href={done}>{done}</a>{' '}
           <a className="next" href="#/reserve">
-            Next: lock the reserve →
+            Next: lock the reserve
           </a>
         </p>
       )}
